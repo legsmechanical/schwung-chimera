@@ -1,0 +1,6 @@
+/* dsp.so exports the plugin entry point and nothing else (the Rust engine and its std
+ * included: they are linked in statically and must not interpose on the host's symbols). */
+{
+    global: move_plugin_init_v2;
+    local: *;
+};

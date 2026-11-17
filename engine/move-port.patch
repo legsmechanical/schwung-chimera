@@ -1,0 +1,1149 @@
+diff --git a/crates/chimera-cli/src/diagnose.rs b/crates/chimera-cli/src/diagnose.rs
+index 3dbfe99..fd6d7c1 100644
+--- a/crates/chimera-cli/src/diagnose.rs
++++ b/crates/chimera-cli/src/diagnose.rs
+@@ -92,7 +92,9 @@ pub fn run(ctx: &Ctx, a: &[String]) -> Result<(), String> {
+     let win = hann(2048);
+ 
+     for (si, text) in SENTENCES.iter().enumerate() {
+-        let mut v = HumanVoice::new(FS, chimera::anatomy::human::BODY_MALE, 2);
++        let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
++        let mut v = HumanVoice::new(FS, chimera::anatomy::human::BODY_MALE, env("CHIMERA_OS", 2));
++        v.set_light(env("CHIMERA_GEO", 0), env("CHIMERA_DIV", 1));
+         let phrases = g.to_phrases(text);
+         let inputs: Vec<PhraseInput> = phrases
+             .iter()
+diff --git a/crates/chimera/Cargo.toml b/crates/chimera/Cargo.toml
+index 4a52dc1..88f0bdc 100644
+--- a/crates/chimera/Cargo.toml
++++ b/crates/chimera/Cargo.toml
+@@ -12,3 +12,11 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
+ 
+ [dev-dependencies]
+ flate2 = "1"
++
++[features]
++# timers around the render stages (examples/prof.rs)
++prof = []
++
++[[example]]
++name = "prof"
++required-features = ["prof"]
+diff --git a/crates/chimera/examples/abrender.rs b/crates/chimera/examples/abrender.rs
+new file mode 100644
+index 0000000..a0fbdf1
+--- /dev/null
++++ b/crates/chimera/examples/abrender.rs
+@@ -0,0 +1,118 @@
++//! Move port: A/B listening files — each one plays the full engine, a beep, then the light one.
++//! Usage: abrender <outdir>
++use chimera::anatomy::human::{BODY_CHILD, BODY_FEMALE, BODY_MALE, HumanBody};
++use chimera::creatures::CREATURES;
++use chimera::creatures::build::set_section_scale;
++use chimera::creatures::types::CreatureDef;
++use chimera::creatures::voice::CreatureVoice;
++use chimera::phonetics::ipa::tokenize_ipa;
++use chimera::phonetics::planner::{PlanOptions, plan_utterance};
++use chimera::voice::human_voice::{HumanVoice, SourcePatch};
++use std::io::Write;
++
++const FS: f64 = 44100.0;
++const TEXT: &str = "ðə ˈnɔɹθ ˈwɪnd ænd ðə ˈsʌn wɚ dɪˈspjutɪŋ ˈwɪtʃ wəz ðə ˈstɹɔŋɡɚ / ʃi ˈsɛlz ˈsi ˈʃɛlz baɪ ðə ˈsi ˈʃɔɹ / ˈɑɑɑɑɑɑ";
++
++/// the light settings the module will use, per creature: (oversample, section scale)
++pub fn creature_light(id: &str) -> (usize, f64) {
++    match id {
++        "songbird" => (2, 1.0),
++        "seal" => (1, 1.5),
++        "alligator" => (1, 1.5),
++        "elephant" => (1, 2.0),
++        _ => (1, 1.0),
++    }
++}
++
++fn wav(path: &str, x: &[f32]) {
++    let n = x.len() as u32;
++    let mut h = Vec::new();
++    h.extend(b"RIFF");
++    h.extend((36 + n * 2).to_le_bytes());
++    h.extend(b"WAVEfmt ");
++    h.extend(16u32.to_le_bytes());
++    h.extend(1u16.to_le_bytes());
++    h.extend(1u16.to_le_bytes());
++    h.extend((FS as u32).to_le_bytes());
++    h.extend((FS as u32 * 2).to_le_bytes());
++    h.extend(2u16.to_le_bytes());
++    h.extend(16u16.to_le_bytes());
++    h.extend(b"data");
++    h.extend((n * 2).to_le_bytes());
++    for &s in x {
++        h.extend(((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
++    }
++    std::fs::File::create(path).unwrap().write_all(&h).unwrap();
++}
++
++/// a short quiet beep between A and B
++fn divider(out: &mut Vec<f32>) {
++    out.extend(std::iter::repeat_n(0.0, (0.5 * FS) as usize));
++    for i in 0..(0.12 * FS) as usize {
++        out.push(0.15 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / FS).sin() as f32);
++    }
++    out.extend(std::iter::repeat_n(0.0, (0.5 * FS) as usize));
++}
++
++fn speech(body: HumanBody, name: &str, f0: f64, light: bool) -> Vec<f32> {
++    let mut v = HumanVoice::new(FS, body, if light { 1 } else { 2 });
++    if light {
++        v.set_light(4, 2);
++    }
++    v.set_source(&SourcePatch { f0: Some(f0), vibrato_depth: Some(30.0), ..Default::default() });
++    let mut t0 = 0.05;
++    for u in TEXT.split('/') {
++        let plan = plan_utterance(&tokenize_ipa(u.trim()), &PlanOptions { body: name.into(), t0, f0: Some(f0), ..Default::default() });
++        v.schedule(&plan.gestures);
++        t0 = plan.end + 0.35;
++    }
++    let mut out = vec![0f32; (FS * (t0 + 0.3)) as usize];
++    for b in out.chunks_mut(128) {
++        v.render(b);
++    }
++    out
++}
++
++fn creature(def: &'static CreatureDef, light: bool) -> Vec<f32> {
++    let (m, scale) = if light { creature_light(def.id) } else { (def.oversample as usize, 1.0) };
++    set_section_scale(scale);
++    let mut v = CreatureVoice::with_rate(def, FS, &[], m);
++    set_section_scale(1.0);
++    if light {
++        v.set_geo_every(4);
++    }
++    let mut out = Vec::new();
++    let run = |v: &mut CreatureVoice, secs: f64, out: &mut Vec<f32>| {
++        let mut b = [0f32; 128];
++        for _ in 0..(secs * FS / 128.0) as usize {
++            v.render(&mut b);
++            out.extend_from_slice(&b);
++        }
++    };
++    // a held note, then every call
++    v.set_gate(1.0);
++    run(&mut v, 2.0, &mut out);
++    v.set_gate(0.0);
++    run(&mut v, 0.5, &mut out);
++    for c in 0..def.calls.len() {
++        v.play_call(c, None, 1.0);
++        run(&mut v, 2.2, &mut out);
++    }
++    out
++}
++
++fn main() {
++    let dir = std::env::args().nth(1).unwrap_or("/out".into());
++    for (body, name, f0) in [(BODY_MALE, "male", 110.0), (BODY_FEMALE, "female", 200.0), (BODY_CHILD, "child", 250.0)] {
++        let mut out = speech(body, name, f0, false);
++        divider(&mut out);
++        out.extend(speech(body, name, f0, true));
++        wav(&format!("{dir}/AB_voice_{name}.wav"), &out);
++    }
++    for def in CREATURES.iter() {
++        let mut out = creature(def, false);
++        divider(&mut out);
++        out.extend(creature(def, true));
++        wav(&format!("{dir}/AB_creature_{}.wav", def.id), &out);
++    }
++}
+diff --git a/crates/chimera/examples/lightcheck.rs b/crates/chimera/examples/lightcheck.rs
+new file mode 100644
+index 0000000..ce76e40
+--- /dev/null
++++ b/crates/chimera/examples/lightcheck.rs
+@@ -0,0 +1,78 @@
++//! Move port: stability of the light voice at a 44.1 kHz airway, and A/B renders to listen to.
++//! Usage: lightcheck <outdir>
++use chimera::anatomy::human::{BODY_CHILD, BODY_FEMALE, BODY_MALE, HumanBody, NEUTRAL};
++use chimera::phonetics::ipa::tokenize_ipa;
++use chimera::phonetics::planner::{PlanOptions, plan_utterance};
++use chimera::voice::human_airway::HumanAirway;
++use chimera::voice::human_voice::{HumanVoice, SourcePatch};
++use std::io::Write;
++
++const FS: f64 = 44100.0;
++const TEXT: &str = "ðə ˈnɔɹθ ˈwɪnd ænd ðə ˈsʌn wɚ dɪˈspjutɪŋ ˈwɪtʃ wəz ðə ˈstɹɔŋɡɚ / ʃi ˈsɛlz ˈsi ˈʃɛlz baɪ ðə ˈsi ˈʃɔɹ";
++
++pub fn wav(path: &str, x: &[f32]) {
++    let n = x.len() as u32;
++    let mut h = Vec::new();
++    h.extend(b"RIFF");
++    h.extend((36 + n * 2).to_le_bytes());
++    h.extend(b"WAVEfmt ");
++    h.extend(16u32.to_le_bytes());
++    h.extend(1u16.to_le_bytes());
++    h.extend(1u16.to_le_bytes());
++    h.extend((FS as u32).to_le_bytes());
++    h.extend((FS as u32 * 2).to_le_bytes());
++    h.extend(2u16.to_le_bytes());
++    h.extend(16u16.to_le_bytes());
++    h.extend(b"data");
++    h.extend((n * 2).to_le_bytes());
++    for &s in x {
++        h.extend(((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
++    }
++    std::fs::File::create(path).unwrap().write_all(&h).unwrap();
++}
++
++fn speech(body: HumanBody, name: &str, f0: f64, light: bool) -> Vec<f32> {
++    let mut v = HumanVoice::new(FS, body, if light { 1 } else { 2 });
++    if light {
++        v.set_light(4, 2);
++    }
++    v.set_source(&SourcePatch::f0(f0));
++    let mut t0 = 0.05;
++    for u in TEXT.split('/') {
++        let plan = plan_utterance(&tokenize_ipa(u.trim()), &PlanOptions { body: name.into(), t0, f0: Some(f0), ..Default::default() });
++        v.schedule(&plan.gestures);
++        t0 = plan.end + 0.35;
++    }
++    let mut out = vec![0f32; (FS * (t0 + 0.2)) as usize];
++    for b in out.chunks_mut(128) {
++        v.render(b);
++    }
++    out
++}
++
++fn main() {
++    let dir = std::env::args().nth(1).unwrap_or("/out".into());
++    let rms = |x: &[f32]| (x.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
++    for (body, name, f0) in [(BODY_MALE, "male", 110.0), (BODY_FEMALE, "female", 200.0), (BODY_CHILD, "child", 250.0)] {
++        // the worst Courant number over the poses the engine's own guard test sweeps
++        let mut air = HumanAirway::new(FS, body);
++        let mut worst: f64 = 0.0;
++        for tb_y in [0.0, 2.0, 5.67, 8.0] {
++            for lp in [-0.2, 1.5] {
++                for lx in [-1.6, 1.6] {
++                    let mut a = NEUTRAL;
++                    a.tb_y = tb_y;
++                    a.lip_prot = lp;
++                    a.larynx = lx;
++                    air.apply(&a, 0.0);
++                    worst = worst.max(air.net.check_cfl());
++                }
++            }
++        }
++        let full = speech(body, name, f0, false);
++        let light = speech(body, name, f0, true);
++        println!("{name:6}: Courant {worst:.3} (limit 0.971), finite {}, RMS light/full {:.2}", light.iter().all(|s| s.is_finite()), rms(&light) / rms(&full));
++        wav(&format!("{dir}/speech_{name}_full.wav"), &full);
++        wav(&format!("{dir}/speech_{name}_light.wav"), &light);
++    }
++}
+diff --git a/crates/chimera/examples/movebench.rs b/crates/chimera/examples/movebench.rs
+new file mode 100644
+index 0000000..81b5343
+--- /dev/null
++++ b/crates/chimera/examples/movebench.rs
+@@ -0,0 +1,78 @@
++//! Move port: real-time cost per voice at 44.1 kHz in 128-frame blocks, full vs light.
++use chimera::anatomy::human::{BODY_FEMALE, BODY_MALE};
++use chimera::creatures::CREATURES;
++use chimera::creatures::voice::CreatureVoice;
++use chimera::phonetics::ipa::tokenize_ipa;
++use chimera::phonetics::planner::{PlanOptions, plan_utterance};
++use chimera::voice::human_voice::{HumanVoice, SourcePatch};
++use std::time::Instant;
++
++const FS: f64 = 44100.0;
++
++fn bad(b: &[f32]) -> bool {
++    b.iter().any(|x| !x.is_finite())
++}
++
++/// (% of one core on average, worst block as % of its 2.9 ms deadline)
++fn time_blocks(secs: f64, mut f: impl FnMut(&mut [f32])) -> (f64, f64) {
++    let blocks = (secs * FS / 128.0) as usize;
++    let mut buf = [0f32; 128];
++    let mut worst = 0f64;
++    let t = Instant::now();
++    for _ in 0..blocks {
++        let b = Instant::now();
++        f(&mut buf);
++        worst = worst.max(b.elapsed().as_secs_f64());
++    }
++    (100.0 * t.elapsed().as_secs_f64() / secs, 100.0 * worst / (128.0 / FS))
++}
++
++fn main() {
++    let secs = 6.0;
++    let text = "ðə ˈnɔɹθ ˈwɪnd ænd ðə ˈsʌn wɚ dɪˈspjutɪŋ ˈwɪtʃ wəz ðə ˈstɹɔŋɡɚ";
++    for (body, name, f0) in [(BODY_MALE, "male", 110.0), (BODY_FEMALE, "female", 200.0)] {
++        for (os, geo, div) in [(2usize, 0usize, 1usize), (1, 4, 2)] {
++            let mut v = HumanVoice::new(FS, body, os);
++            v.set_light(geo, div);
++            v.set_source(&SourcePatch::f0(f0));
++            let plan = plan_utterance(&tokenize_ipa(text), &PlanOptions { body: name.into(), t0: 0.05, f0: Some(f0), ..Default::default() });
++            v.schedule(&plan.gestures);
++            let (avg, worst) = time_blocks(secs, |b| v.render(b));
++            println!("speech {name:6} os={os} geo={geo} div={div}: avg {avg:5.1}% of a core, worst block {worst:5.1}%");
++        }
++    }
++    let only = std::env::args().nth(1);
++    for def in CREATURES.iter() {
++        if only.as_deref().is_some_and(|o| o != def.id) {
++            continue;
++        }
++        let full = def.oversample as usize;
++        let light = (full / 2).max(1);
++        let cfgs = [(full, 0usize, 1.0), (light, 4, 1.0), (light, 4, 1.5), (light, 4, 2.0)];
++        for (m, geo, scale) in cfgs {
++            chimera::creatures::build::set_section_scale(scale);
++            let mut v = CreatureVoice::with_rate(def, FS, &[], m);
++            chimera::creatures::build::set_section_scale(1.0);
++            v.set_geo_every(geo);
++            v.set_gate(1.0);
++            let mut finite = true;
++            let (avg, worst) = time_blocks(secs, |b| {
++                v.render(b);
++                if bad(b) {
++                    finite = false;
++                }
++            });
++            let mut out = [0f32; 128];
++            for c in 0..def.calls.len() {
++                v.play_call(c, None, 1.0);
++                for _ in 0..(1.5 * FS / 128.0) as usize {
++                    v.render(&mut out);
++                    if bad(&out) {
++                        finite = false;
++                    }
++                }
++            }
++            println!("creature {:9} os={m} geo={geo} sect x{scale}: {:3} nodes, avg {avg:5.1}% of a core, worst block {worst:5.1}%, finite {finite}", def.id, v.airway_nodes());
++        }
++    }
++}
+diff --git a/crates/chimera/examples/prof.rs b/crates/chimera/examples/prof.rs
+new file mode 100644
+index 0000000..e753c8d
+--- /dev/null
++++ b/crates/chimera/examples/prof.rs
+@@ -0,0 +1,36 @@
++//! Move port: where a voice's time goes (build with --features prof).
++use chimera::airway::network::NPROF;
++use chimera::anatomy::human::BODY_MALE;
++use chimera::phonetics::ipa::tokenize_ipa;
++use chimera::phonetics::planner::{PlanOptions, plan_utterance};
++use chimera::voice::human_voice::{HumanVoice, PROF, SourcePatch};
++use std::sync::atomic::Ordering;
++
++fn main() {
++    let fs = 44100.0;
++    for (os, geo, div) in [(2usize, 0usize, 1usize), (1, 4, 2)] {
++        PROF.iter().chain(NPROF.iter()).for_each(|p| p.store(0, Ordering::Relaxed));
++        let mut v = HumanVoice::new(fs, BODY_MALE, os);
++        v.set_light(geo, div);
++        v.set_source(&SourcePatch::f0(110.0));
++        let plan = plan_utterance(&tokenize_ipa("ðə ˈnɔɹθ ˈwɪnd ænd ðə ˈsʌn wɚ dɪˈspjutɪŋ ˈwɪtʃ wəz ðə ˈstɹɔŋɡɚ"), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
++        v.schedule(&plan.gestures);
++        let secs = 6.0;
++        let mut b = [0f32; 128];
++        let t = std::time::Instant::now();
++        for _ in 0..(secs * fs / 128.0) as usize {
++            v.render(&mut b);
++        }
++        let total = t.elapsed().as_secs_f64();
++        println!("os={os} geo={geo} div={div}: {:.1}% of a core (timers included)", 100.0 * total / secs);
++        let pct = |ns: u64| 100.0 * ns as f64 * 1e-9 / total;
++        for (i, n) in ["control", "glottis", "airway step", "decimator", "output", " ctl: score+artic", " ctl: shape", " ctl: contacts", " ctl: begin_block"].iter().enumerate() {
++            println!("   {n:18} {:5.1}%", pct(PROF[i].load(Ordering::Relaxed)));
++        }
++        if geo > 0 {
++            for (i, n) in ["geo update", "ramps", "vol src", "noise", "branches", "walls", "nodes"].iter().enumerate() {
++                println!("     step: {n:12} {:5.1}%", pct(NPROF[i].load(Ordering::Relaxed)));
++            }
++        }
++    }
++}
+diff --git a/crates/chimera/src/airway/network.rs b/crates/chimera/src/airway/network.rs
+index e8cc693..c5763dd 100644
+--- a/crates/chimera/src/airway/network.rs
++++ b/crates/chimera/src/airway/network.rs
+@@ -341,6 +341,66 @@ pub struct AirwayNetwork {
+     pub noise_scale: f64,
+     /// last output sample (radiated pressure derivative)
+     pub out: f64,
++    /// Move port: refresh geometry-derived coefficients every this many samples and ramp them
++    /// linearly in between (0 = every sample, the exact path). Must divide the control block.
++    pub geo_every: usize,
++    geo_count: usize,
++    fc: FastCache,
++    /// ports driven per sample (`set_port_area`: the glottis, syrinx valves): the fast path
++    /// solves these from their current area every sample
++    port_live: Vec<bool>,
++}
++
++#[cfg(feature = "prof")]
++pub static NPROF: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
++
++/// Coefficients the fast path holds between geometry refreshes, with per-sample increments: each
++/// ramps linearly to its value at the next refresh (held steps would modulate the steady airflow
++/// into a click train at fs / geo_every).
++#[derive(Clone, Debug, Default)]
++struct FastCache {
++    closed: Vec<bool>,
++    l: Vec<f64>,
++    bq: Vec<f64>,
++    inv_bq: Vec<f64>,
++    kf4: Vec<f64>,
++    kb4: Vec<f64>,
++    sealed: Vec<bool>,
++    tc: Vec<f64>,
++    cn_num: Vec<f64>,
++    cn_den_inv: Vec<f64>,
++    wall_a: Vec<f64>,
++    wall_b: Vec<f64>,
++    wall_coef: Vec<f64>,
++    rad_lr: Vec<f64>,
++    rad_h: Vec<f64>,
++    rad_g: Vec<f64>,
++    d_l: Vec<f64>,
++    d_bq: Vec<f64>,
++    d_inv_bq: Vec<f64>,
++    d_kf4: Vec<f64>,
++    d_kb4: Vec<f64>,
++    d_tc: Vec<f64>,
++    d_cn_num: Vec<f64>,
++    d_cn_den_inv: Vec<f64>,
++    d_wall_coef: Vec<f64>,
++    d_rad_lr: Vec<f64>,
++    d_rad_h: Vec<f64>,
++    d_rad_g: Vec<f64>,
++    primed: bool,
++    /// the moving-wall injection is zero and its filters have decayed: skip them
++    vol_idle: bool,
++}
++
++/// Ramp `cur` to `tgt` over the span (`inv_g` = 1 / span), or jump there when `snap`.
++#[inline]
++fn ramp_to(cur: &mut f64, d: &mut f64, tgt: f64, inv_g: f64, snap: bool) {
++    if snap {
++        *cur = tgt;
++        *d = 0.0;
++    } else {
++        *d = (tgt - *cur) * inv_g;
++    }
+ }
+ 
+ impl AirwayNetwork {
+@@ -434,6 +494,10 @@ impl AirwayNetwork {
+             viscous_omega: 2.0 * PI * 700.0,
+             noise_scale: 1.0,
+             out: 0.0,
++            geo_every: 0,
++            geo_count: 0,
++            fc: FastCache::default(),
++            port_live: Vec::new(),
+         }
+     }
+ 
+@@ -674,6 +738,9 @@ impl AirwayNetwork {
+     /// Immediately set a port area (per-sample sources such as the glottis call this every sample).
+     #[inline]
+     pub fn set_port_area(&mut self, branch: usize, area: f64) {
++        if let Some(l) = self.port_live.get_mut(branch) {
++            *l = true;
++        }
+         self.port_area[branch] = if area < 0.0 { 0.0 } else { area };
+         self.port_area_target[branch] = self.port_area[branch];
+         self.port_area_step[branch] = 0.0;
+@@ -706,6 +773,7 @@ impl AirwayNetwork {
+ 
+     /// Prepare per-sample linear ramps toward the targets over `samples` internal samples.
+     pub fn begin_block(&mut self, samples: usize) {
++        self.geo_count = 0;
+         let inv = 1.0 / js_max(1.0, samples as f64);
+         let mut max_p = 0.0;
+         for k in 0..self.n_nodes {
+@@ -825,6 +893,9 @@ impl AirwayNetwork {
+ 
+     /// Advance one internal sample. Returns radiated pressure (arbitrary units ∝ dU_rad/dt).
+     pub fn step(&mut self) -> f64 {
++        if self.geo_every > 0 {
++            return self.step_fast();
++        }
+         let n = self.n_nodes;
+         let nb = self.n_branches;
+         let t = self.t;
+@@ -1152,6 +1223,463 @@ impl AirwayNetwork {
+         out
+     }
+ 
++    /// Fast path, geometry half: advance the ramps by `geo_every` samples and derive every
++    /// coefficient the acoustic step needs until the next refresh (ramped to, sample by sample).
++    fn geo_update(&mut self) {
++        let g = self.geo_every as f64;
++        let inv_g = 1.0 / g;
++        let n = self.n_nodes;
++        let nb = self.n_branches;
++        let t = self.t;
++        let inv_t = self.inv_t;
++        let min_a = self.min_node_area;
++        let sq = self.squeeze_area;
++        let vol_on = self.enable_volume_source;
++        let mut fc = core::mem::take(&mut self.fc);
++        if self.port_live.len() != nb {
++            self.port_live.resize(nb, false);
++        }
++        if fc.l.len() != nb {
++            fc.primed = false;
++            for v in [&mut fc.l, &mut fc.bq, &mut fc.inv_bq, &mut fc.kf4, &mut fc.kb4, &mut fc.d_l, &mut fc.d_bq, &mut fc.d_inv_bq, &mut fc.d_kf4, &mut fc.d_kb4] {
++                *v = vec![0.0; nb];
++            }
++            fc.closed = vec![false; nb];
++        }
++        if fc.tc.len() != n {
++            fc.primed = false;
++            for v in [&mut fc.tc, &mut fc.cn_num, &mut fc.cn_den_inv, &mut fc.wall_a, &mut fc.wall_b, &mut fc.wall_coef, &mut fc.d_tc, &mut fc.d_cn_num, &mut fc.d_cn_den_inv, &mut fc.d_wall_coef] {
++                *v = vec![0.0; n];
++            }
++            fc.sealed = vec![false; n];
++        }
++        let nr = self.rad_nodes.len();
++        if fc.rad_lr.len() != nr {
++            fc.primed = false;
++            for v in [&mut fc.rad_lr, &mut fc.rad_h, &mut fc.rad_g, &mut fc.d_rad_lr, &mut fc.d_rad_h, &mut fc.d_rad_g] {
++                *v = vec![0.0; nr];
++            }
++        }
++        let first = !fc.primed;
++        fc.primed = true;
++        // 1) geometry (the per-sample raw injection is the span's volume change spread evenly)
++        if vol_on {
++            self.spill.fill(0.0);
++        }
++        for k in 0..n {
++            let mut a = self.area[k] + self.area_step[k] * g;
++            if a < 0.0 {
++                a = 0.0;
++            }
++            self.area[k] = a;
++            let mut am = self.amin[k] + self.amin_step[k] * g;
++            if am < 0.0 {
++                am = 0.0;
++            }
++            let amk = if am > a { a } else { am };
++            self.amin[k] = amk;
++            self.dx[k] += self.dx_step[k] * g;
++            let d = self.dx[k];
++            let ia = 1.0 / (if a > 1e-6 { a } else { 1e-6 });
++            self.inv_a[k] = ia;
++            self.inv_amin[k] = 1.0 / (if amk > 1e-6 { amk } else { 1e-6 });
++            let sa = sqrt(a);
++            self.sqrt_a[k] = sa;
++            self.half_l[k] = d * ia;
++            self.half_r[k] = self.wall_perim[k] * d * sa * ia * ia * self.visc_f[k];
++            let v = (if a > min_a { a } else { min_a }) * d;
++            if vol_on {
++                let raw = -(v - self.vol[k]) * inv_t * inv_g;
++                let ae = if amk < a { amk } else { a };
++                if raw != 0.0 && ae < sq {
++                    let tt = ae / sq;
++                    let keep = tt * tt * (3.0 - 2.0 * tt);
++                    self.spill[k] += raw * keep;
++                    let sp = raw * (1.0 - keep);
++                    let (s0, s1) = (self.nbr_start[k], self.nbr_start[k + 1]);
++                    let mut n_open = 0usize;
++                    for e in s0..s1 {
++                        let m = self.nbr_list[e];
++                        if js_min(self.area[m], self.amin[m]) >= sq || self.amin_target[m] >= sq {
++                            n_open += 1;
++                        }
++                    }
++                    if n_open > 0 {
++                        let share = sp / n_open as f64;
++                        for e in s0..s1 {
++                            let m = self.nbr_list[e];
++                            if js_min(self.area[m], self.amin[m]) >= sq || self.amin_target[m] >= sq {
++                                self.spill[m] += share;
++                            }
++                        }
++                    }
++                } else {
++                    self.spill[k] += raw;
++                }
++            }
++            self.vol[k] = v;
++            self.inv_lsum[k] = 0.0;
++        }
++        fc.vol_idle = !vol_on || (self.spill[..n].iter().all(|&x| x == 0.0) && self.vol_src1[..n].iter().chain(&self.vol_src2[..n]).all(|&x| x.abs() < 1e-12));
++        if fc.vol_idle {
++            self.vol_src1[..n].fill(0.0);
++            self.vol_src2[..n].fill(0.0);
++        }
++        // 2) branch elements
++        let visc = sqrt((RHO * MU * self.viscous_omega) / 2.0) * self.viscous_scale;
++        let closed = self.closed_area;
++        let half_rho = 0.5 * RHO;
++        for j in 0..nb {
++            let a = self.b_a[j];
++            let b = self.b_b[j];
++            let l: f64;
++            let r: f64;
++            let mut kf: f64;
++            let mut kb: f64;
++            let a_eff: f64;
++            if self.b_kind[j] == KIND_SERIES {
++                let aa = self.area[a];
++                let ab = self.area[b];
++                let ma = self.amin[a];
++                let mb = self.amin[b];
++                a_eff = if ma < mb { ma } else { mb };
++                if (if aa < ab { aa } else { ab }) < closed || a_eff < closed {
++                    fc.closed[j] = true;
++                    self.branch_area[j] = a_eff;
++                    continue;
++                }
++                let ia = self.inv_a[a];
++                let ib = self.inv_a[b];
++                l = half_rho * (self.half_l[a] + self.half_l[b]);
++                r = 0.5 * visc * (self.half_r[a] + self.half_r[b]);
++                let ima = self.inv_amin[a];
++                let imb = self.inv_amin[b];
++                let ef = ima - ib;
++                let eb = imb - ia;
++                kf = if ef > 0.0 { half_rho * ef * ef } else { 0.0 };
++                kb = if eb > 0.0 { half_rho * eb * eb } else { 0.0 };
++                let cf = imb - ia;
++                let cb = ima - ib;
++                if cf > 0.0 {
++                    kf += 0.1 * half_rho * cf * cf;
++                }
++                if cb > 0.0 {
++                    kb += 0.1 * half_rho * cb * cb;
++                }
++            } else {
++                self.port_area[j] += self.port_area_step[j] * g;
++                let mut ap = self.port_area[j];
++                if ap < 0.0 {
++                    self.port_area[j] = 0.0;
++                    ap = 0.0;
++                }
++                a_eff = ap;
++                if ap < closed {
++                    fc.closed[j] = true;
++                    self.branch_area[j] = ap;
++                    continue;
++                }
++                let ip = 1.0 / ap;
++                let len = self.port_len[j];
++                let mut ll = RHO * len * ip;
++                if self.port_half[j] {
++                    ll += half_rho * (self.half_l[a] + self.half_l[b]);
++                }
++                l = ll;
++                let w = self.port_slit[j];
++                let mut rr = if w > 0.0 { (12.0 * MU * len * w * w) * ip * ip * ip } else { visc * 2.0 * sqrt(PI) * len * sqrt(ap) * ip * ip };
++                rr += self.port_extra_r[j];
++                r = rr;
++                let ex_f = ip - self.inv_a[b];
++                let ex_b = ip - self.inv_a[a];
++                let kin = self.port_kin[j] * half_rho * ip * ip;
++                kf = kin + self.port_kex[j] * half_rho * (if ex_f > 0.0 { ex_f * ex_f } else { 0.0 });
++                kb = kin + self.port_kex[j] * half_rho * (if ex_b > 0.0 { ex_b * ex_b } else { 0.0 });
++            }
++            self.branch_area[j] = a_eff;
++            if self.symmetric_kinetic {
++                let km = if kf > kb { kf } else { kb };
++                kf = km;
++                kb = km;
++            }
++            let snap = first || fc.closed[j];
++            fc.closed[j] = false;
++            let bq = l * inv_t + r;
++            ramp_to(&mut fc.l[j], &mut fc.d_l[j], l, inv_g, snap);
++            ramp_to(&mut fc.bq[j], &mut fc.d_bq[j], bq, inv_g, snap);
++            ramp_to(&mut fc.inv_bq[j], &mut fc.d_inv_bq[j], 1.0 / bq, inv_g, snap);
++            ramp_to(&mut fc.kf4[j], &mut fc.d_kf4[j], 4.0 * kf, inv_g, snap);
++            ramp_to(&mut fc.kb4[j], &mut fc.d_kb4[j], 4.0 * kb, inv_g, snap);
++            if self.is_junction[a] | self.is_junction[b] {
++                let il = 1.0 / l;
++                self.inv_lsum[a] += il;
++                self.inv_lsum[b] += il;
++            }
++        }
++        // 3) node elements
++        let t2 = t * t;
++        let cl = self.closed_area;
++        for k in 0..n {
++            if self.has_wall[k] {
++                let m = self.wall_m[k];
++                let r = self.wall_r[k];
++                let den = m * inv_t + 0.5 * r;
++                fc.wall_a[k] = (m * inv_t - 0.5 * r) / den;
++                fc.wall_b[k] = 1.0 / den;
++                let sa = if self.area[k] > min_a { self.sqrt_a[k] } else { sqrt(min_a) };
++                ramp_to(&mut fc.wall_coef[k], &mut fc.d_wall_coef[k], self.wall_perim[k] * sa * self.dx[k], inv_g, first);
++            }
++            if self.fixed[k] {
++                continue;
++            }
++            let sealed = self.area[k] < cl || self.amin[k] < cl;
++            let snap = first || fc.sealed[k];
++            fc.sealed[k] = sealed;
++            if sealed {
++                continue;
++            }
++            let mut c = self.vol[k] / RHO_C2;
++            if self.is_junction[k] && self.enable_junction_floor {
++                let c_min = (t2 * self.inv_lsum[k]) / 2.4;
++                if c < c_min {
++                    c = c_min;
++                }
++            }
++            let rr_i = self.rad_of[k];
++            if rr_i < 0 {
++                ramp_to(&mut fc.tc[k], &mut fc.d_tc[k], t / c, inv_g, snap);
++            } else {
++                let ri = rr_i as usize;
++                let a = if self.area[k] > 1e-4 { self.area[k] } else { 1e-4 };
++                let lr = (8.0 * RHO) / (3.0 * PI * sqrt(PI * a));
++                let rr = (128.0 * RHO * C_SOUND) / (9.0 * PI * PI * a);
++                let h = t / (2.0 * lr);
++                let gg = 0.5 / rr;
++                ramp_to(&mut fc.rad_lr[ri], &mut fc.d_rad_lr[ri], lr, inv_g, snap);
++                ramp_to(&mut fc.rad_h[ri], &mut fc.d_rad_h[ri], h, inv_g, snap);
++                ramp_to(&mut fc.rad_g[ri], &mut fc.d_rad_g[ri], gg, inv_g, snap);
++                ramp_to(&mut fc.cn_num[k], &mut fc.d_cn_num[k], c * inv_t - 0.5 * h - gg, inv_g, snap);
++                ramp_to(&mut fc.cn_den_inv[k], &mut fc.d_cn_den_inv[k], 1.0 / (c * inv_t + 0.5 * h + gg), inv_g, snap);
++            }
++        }
++        self.fc = fc;
++    }
++
++    /// Fast path, acoustic half: the same scheme as `step` with geometry-derived coefficients
++    /// ramped between refreshes (no divisions or square roots per node per sample). Ports driven
++    /// per sample keep the exact solve.
++    fn step_fast(&mut self) -> f64 {
++        #[cfg(feature = "prof")]
++        let mut tt = std::time::Instant::now();
++        #[cfg(feature = "prof")]
++        macro_rules! lap { ($i:expr) => {{ let n = std::time::Instant::now(); NPROF[$i].fetch_add((n - tt).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed); tt = n; }}; }
++        #[cfg(not(feature = "prof"))]
++        macro_rules! lap { ($i:expr) => {}; }
++        if self.geo_count == 0 {
++            self.geo_update();
++            self.geo_count = self.geo_every;
++        }
++        self.geo_count -= 1;
++        lap!(0);
++        let n = self.n_nodes;
++        let nb = self.n_branches;
++        let t = self.t;
++        let inv_t = self.inv_t;
++        {
++            let fc = &mut self.fc;
++            for j in 0..nb {
++                fc.l[j] += fc.d_l[j];
++                fc.bq[j] += fc.d_bq[j];
++                fc.inv_bq[j] += fc.d_inv_bq[j];
++                fc.kf4[j] += fc.d_kf4[j];
++                fc.kb4[j] += fc.d_kb4[j];
++            }
++            for k in 0..n {
++                fc.tc[k] += fc.d_tc[k];
++                fc.cn_num[k] += fc.d_cn_num[k];
++                fc.cn_den_inv[k] += fc.d_cn_den_inv[k];
++                fc.wall_coef[k] += fc.d_wall_coef[k];
++            }
++            for r in 0..fc.rad_lr.len() {
++                fc.rad_lr[r] += fc.d_rad_lr[r];
++                fc.rad_h[r] += fc.d_rad_h[r];
++                fc.rad_g[r] += fc.d_rad_g[r];
++            }
++        }
++        lap!(1);
++        for k in 0..n {
++            self.flow_sum[k] = self.ext_flow[k];
++            self.ext_flow[k] = 0.0;
++        }
++        if !self.fc.vol_idle {
++            let c = self.vol_lp_coef;
++            for k in 0..n {
++                self.vol_src1[k] += c * (self.spill[k] - self.vol_src1[k]);
++                let s1 = self.vol_src1[k];
++                self.vol_src2[k] += c * (s1 - self.vol_src2[k]);
++                self.flow_sum[k] += self.vol_src2[k];
++            }
++        }
++        lap!(2);
++        self.psrc.fill(0.0);
++        if !self.noise.is_empty() {
++            self.compute_noise();
++        }
++        lap!(3);
++        let enable_energy_safe = self.energy_safe;
++        {
++            let fc = &self.fc;
++            let p = &self.p[..n];
++            let flow_sum = &mut self.flow_sum[..n];
++            let (b_a, b_b) = (&self.b_a[..nb], &self.b_b[..nb]);
++            let (u_arr, mom, l_prev, psrc) = (&mut self.u[..nb], &mut self.mom[..nb], &mut self.l_prev[..nb], &self.psrc[..nb]);
++            let visc = sqrt((RHO * MU * self.viscous_omega) / 2.0) * self.viscous_scale;
++            let half_rho = 0.5 * RHO;
++            let closed_a = self.closed_area;
++            for j in 0..nb {
++                let a = b_a[j];
++                let b = b_b[j];
++                let (l, bq, inv_bq, kf4, kb4);
++                if self.port_live[j] {
++                    // the original per-sample port solve
++                    let ap = self.port_area[j];
++                    self.branch_area[j] = ap;
++                    if ap < closed_a {
++                        u_arr[j] = 0.0;
++                        mom[j] = 0.0;
++                        continue;
++                    }
++                    let ip = 1.0 / ap;
++                    let len = self.port_len[j];
++                    let mut ll = RHO * len * ip;
++                    if self.port_half[j] {
++                        ll += half_rho * (self.half_l[a] + self.half_l[b]);
++                    }
++                    let w = self.port_slit[j];
++                    let mut rr = if w > 0.0 { (12.0 * MU * len * w * w) * ip * ip * ip } else { visc * 2.0 * sqrt(PI) * len * sqrt(ap) * ip * ip };
++                    rr += self.port_extra_r[j];
++                    let ex_f = ip - self.inv_a[b];
++                    let ex_b = ip - self.inv_a[a];
++                    let kin = self.port_kin[j] * half_rho * ip * ip;
++                    let mut kf = kin + self.port_kex[j] * half_rho * (if ex_f > 0.0 { ex_f * ex_f } else { 0.0 });
++                    let mut kb = kin + self.port_kex[j] * half_rho * (if ex_b > 0.0 { ex_b * ex_b } else { 0.0 });
++                    if self.symmetric_kinetic {
++                        let km = if kf > kb { kf } else { kb };
++                        kf = km;
++                        kb = km;
++                    }
++                    l = ll;
++                    bq = ll * inv_t + rr;
++                    inv_bq = 1.0 / bq;
++                    kf4 = 4.0 * kf;
++                    kb4 = 4.0 * kb;
++                } else {
++                    if fc.closed[j] {
++                        u_arr[j] = 0.0;
++                        mom[j] = 0.0;
++                        continue;
++                    }
++                    l = fc.l[j];
++                    bq = fc.bq[j];
++                    inv_bq = fc.inv_bq[j];
++                    kf4 = fc.kf4[j];
++                    kb4 = fc.kb4[j];
++                }
++                let lp = l_prev[j];
++                let m0 = if enable_energy_safe && l < lp { l * u_arr[j] } else { mom[j] };
++                let c = p[a] - p[b] + psrc[j] + m0 * inv_t;
++                let u = if c >= 0.0 {
++                    if kf4 > 0.0 { (2.0 * c) / (bq + sqrt(bq * bq + kf4 * c)) } else { c * inv_bq }
++                } else if kb4 > 0.0 {
++                    (2.0 * c) / (bq + sqrt(bq * bq - kb4 * c))
++                } else {
++                    c * inv_bq
++                };
++                u_arr[j] = u;
++                mom[j] = l * u;
++                l_prev[j] = l;
++                flow_sum[a] -= u;
++                flow_sum[b] += u;
++            }
++        }
++        lap!(4);
++        let mut wall_rad_sum = 0.0;
++        for k in 0..n {
++            if !self.has_wall[k] {
++                continue;
++            }
++            let v = self.fc.wall_a[k] * self.wall_v[k] + (self.p[k] - self.wall_k[k] * self.wall_y[k]) * self.fc.wall_b[k];
++            self.wall_v[k] = v;
++            self.wall_y[k] += t * v;
++            let uw = self.fc.wall_coef[k] * v;
++            self.wall_u[k] = uw;
++            self.flow_sum[k] -= uw;
++            wall_rad_sum += uw * self.wall_rad[k];
++        }
++        lap!(5);
++        let mut rad_total = wall_rad_sum;
++        let cl = self.closed_area;
++        for k in 0..n {
++            if self.fixed[k] {
++                continue;
++            }
++            if self.fc.sealed[k] {
++                let rr = self.rad_of[k];
++                if rr >= 0 {
++                    self.p[k] *= 0.98;
++                } else {
++                    let mut sum = 0.0;
++                    let mut cnt = 0usize;
++                    for e in self.nbr_start[k]..self.nbr_start[k + 1] {
++                        let m = self.nbr_list[e];
++                        if self.area[m] >= cl && self.amin[m] >= cl {
++                            sum += self.p[m];
++                            cnt += 1;
++                        }
++                    }
++                    if cnt > 0 {
++                        self.p[k] += 0.02 * (sum / cnt as f64 - self.p[k]);
++                    }
++                }
++                if rr >= 0 {
++                    let rr = rr as usize;
++                    self.rad_ul[rr] *= 0.995;
++                    self.rad_u[rr] = self.rad_ul[rr];
++                    rad_total += self.rad_ul[rr];
++                }
++                continue;
++            }
++            let r = self.rad_of[k];
++            if r < 0 {
++                self.p[k] += self.fc.tc[k] * self.flow_sum[k];
++            } else {
++                let r = r as usize;
++                let lr = self.fc.rad_lr[r];
++                let h = self.fc.rad_h[r];
++                let g = self.fc.rad_g[r];
++                let p_old = self.p[k];
++                let lp = self.rad_l_prev[r];
++                let mut ul_prev = self.rad_ul[r];
++                if lp > 0.0 && lr > lp {
++                    ul_prev *= lp / lr;
++                }
++                self.rad_l_prev[r] = lr;
++                let p_new = (p_old * self.fc.cn_num[k] + self.flow_sum[k] - ul_prev) * self.fc.cn_den_inv[k];
++                self.p[k] = p_new;
++                let ul = ul_prev + h * (p_old + p_new);
++                self.rad_ul[r] = ul;
++                let ur = 0.5 * (ul_prev + ul) + g * (p_new + p_old);
++                self.rad_u[r] = ur;
++                rad_total += ur;
++            }
++        }
++        lap!(6);
++        let out = (rad_total - self.rad_prev_total) * inv_t;
++        self.rad_prev_total = rad_total;
++        self.out = out;
++        out
++    }
++
+     fn compute_noise(&mut self) {
+         // white noise power per Hz scales with fs: normalise to a 96 kHz reference
+         let scale = self.noise_scale * sqrt(96000.0 / self.fs);
+@@ -1257,6 +1785,11 @@ impl AirwayNetwork {
+         }
+     }
+ 
++    /// Turbulence noise sources (diagnostics).
++    pub fn noise_count(&self) -> usize {
++        self.noise.len()
++    }
++
+     /// Tube index of a node.
+     pub fn tube_of_node(&self, node: usize) -> usize {
+         self.node_tube[node]
+diff --git a/crates/chimera/src/creatures/build.rs b/crates/chimera/src/creatures/build.rs
+index a29644f..be62243 100644
+--- a/crates/chimera/src/creatures/build.rs
++++ b/crates/chimera/src/creatures/build.rs
+@@ -9,9 +9,21 @@ pub fn dx_min(fs: f64) -> f64 {
+     C_SOUND / fs / 0.93
+ }
+ 
++std::thread_local! {
++    /// Move port: sections this many times longer than stability needs (fewer of them: less work,
++    /// a lower spatial resolution). Read while a creature is built; 1 is the original.
++    static SECTION_SCALE: core::cell::Cell<f64> = const { core::cell::Cell::new(1.0) };
++}
++
++/// Move port: build creatures on this thread with sections `scale` times longer (≥ 1).
++pub fn set_section_scale(scale: f64) {
++    SECTION_SCALE.with(|s| s.set(js_max(1.0, scale)));
++}
++
+ /// Number of sections for a tube: as fine as stability allows, but at least `min`, at most `max`.
+ pub fn sections(fs: f64, length: f64, min: f64, max: f64, coarse: f64) -> usize {
+-    js_max(min, js_min(max, (length / (dx_min(fs) * coarse)).floor())) as usize
++    let scale = SECTION_SCALE.with(|s| s.get());
++    js_max(min, js_min(max, (length / (dx_min(fs) * coarse * scale)).floor())) as usize
+ }
+ 
+ /// A tube's initial area: uniform, or a function of position u ∈ (0,1).
+diff --git a/crates/chimera/src/creatures/voice.rs b/crates/chimera/src/creatures/voice.rs
+index 4db0f54..9a8a7c3 100644
+--- a/crates/chimera/src/creatures/voice.rs
++++ b/crates/chimera/src/creatures/voice.rs
+@@ -147,6 +147,12 @@ impl CreatureVoice {
+     /// same index wins; non-finite values are ignored, as missing keys were in TS).
+     pub fn new(def: &'static CreatureDef, fs_out: f64, initial: &[(usize, f64)]) -> Self {
+         let m = js_max(1.0, js_round(def.oversample as f64 * if fs_out > 60000.0 { 0.5 } else { 1.0 })) as usize;
++        Self::with_rate(def, fs_out, initial, m)
++    }
++
++    /// Move port: a voice simulating at `m` × the output rate.
++    pub fn with_rate(def: &'static CreatureDef, fs_out: f64, initial: &[(usize, f64)], m: usize) -> Self {
++        let m = m.max(1);
+         let fs = fs_out * m as f64;
+         let sim = def.create(fs);
+         let ctrl_every = 64 * m;
+@@ -365,6 +371,18 @@ impl CreatureVoice {
+         self.clock += dt;
+     }
+ 
++    /// Airway sections (diagnostics).
++    pub fn airway_nodes(&self) -> usize {
++        self.sim.net().map_or(0, |n| n.n_nodes)
++    }
++
++    /// Move port: refresh the creature airway's geometry coefficients every `geo` samples.
++    pub fn set_geo_every(&mut self, geo: usize) {
++        if let Some(net) = self.sim.net_mut() {
++            net.geo_every = geo;
++        }
++    }
++
+     /// Render `out.len()` output samples.
+     pub fn render(&mut self, out: &mut [f32]) {
+         let m = self.m;
+diff --git a/crates/chimera/src/voice/human_voice.rs b/crates/chimera/src/voice/human_voice.rs
+index 7f8d1be..10c106a 100644
+--- a/crates/chimera/src/voice/human_voice.rs
++++ b/crates/chimera/src/voice/human_voice.rs
+@@ -155,6 +155,7 @@ pub struct HumanVoice {
+     dec: Decimator,
+     /// internal samples per control step
+     ctrl_every: usize,
++    ctrl_div: usize,
+     ctrl_counter: i64,
+     /// breath gate 0..1 (note on/off)
+     pub gate: f64,
+@@ -207,6 +208,9 @@ pub fn oversample_for(fs_out: f64) -> usize {
+     js_max(1.0, (60000.0 / fs_out).floor() + 1.0) as usize
+ }
+ 
++#[cfg(feature = "prof")]
++pub static PROF: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
++
+ impl HumanVoice {
+     /// A voice rendering at `fs_out`, simulating at `fs_out · oversample`.
+     pub fn new(fs_out: f64, body: HumanBody, oversample: usize) -> Self {
+@@ -224,6 +228,7 @@ impl HumanVoice {
+             source: DEFAULT_SOURCE,
+             dec: Decimator::new(m),
+             ctrl_every: 64 * m,
++            ctrl_div: 1,
+             ctrl_counter: 0,
+             gate: 0.0,
+             gate_target: 0.0,
+@@ -349,8 +354,31 @@ impl HumanVoice {
+         g.effort = clamp((s.pressure.abs() - 3.0) / 10.0, 0.0, 1.0);
+     }
+ 
++    /// Move port: rebuild the tube shape every `div` × 64 output samples (the articulators still
++    /// step every 64: their integrator needs the short step). 1 is the original behaviour.
++    pub fn set_control_div(&mut self, div: usize) {
++        let m = self.ctrl_every / (64 * self.ctrl_div);
++        self.ctrl_div = div.max(1);
++        self.ctrl_every = 64 * m * self.ctrl_div;
++        self.ctrl_counter = 0;
++    }
++
++    /// Move port: the light configuration (airway refresh every `geo` samples, shape every
++    /// `div` × 64).
++    pub fn set_light(&mut self, geo: usize, div: usize) {
++        self.airway.net.geo_every = geo;
++        self.set_control_div(div);
++    }
++
+     /// Render `out.len()` output samples.
+     pub fn render(&mut self, out: &mut [f32]) {
++        #[cfg(feature = "prof")]
++        let mut tt = std::time::Instant::now();
++        #[cfg(feature = "prof")]
++        macro_rules! lap { ($i:expr) => {{ let n = std::time::Instant::now(); PROF[$i].fetch_add((n - tt).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed); tt = n; }}; }
++        #[cfg(not(feature = "prof"))]
++        macro_rules! lap { ($i:expr) => {}; }
++
+         let m = self.m;
+         let lungs = self.airway.lungs;
+         let sub_node = self.airway.trachea.last_node();
+@@ -362,17 +390,23 @@ impl HumanVoice {
+         let or_first = self.airway.oral.first_node();
+         for o in out.iter_mut() {
+             for _ in 0..m {
++                lap!(4);
+                 if self.ctrl_counter <= 0 {
+                     self.control();
+                 }
++                lap!(0);
+                 self.ctrl_counter -= 1;
+                 let net = &mut self.airway.net;
+                 self.p_lung_now += self.p_lung_step;
+                 net.set_fixed_pressure(lungs, self.p_lung_now);
+                 let a = self.glottis.next(net.p[sub_node] - net.p[supra]);
+                 net.set_port_area(gp, a);
++                lap!(1);
+                 let y = net.step();
+-                if self.dec.push(y) {
++                lap!(2);
++                let ready = self.dec.push(y);
++                lap!(3);
++                if ready {
+                     // output sample
+                     let mut v = self.dec.value * self.output_gain;
+                     // DC blocker
+@@ -433,11 +467,24 @@ impl HumanVoice {
+ 
+     /// Control-rate update: articulator dynamics, geometry → areas, breath, pitch.
+     fn control(&mut self) {
+-        let dt = self.ctrl_every as f64 / self.fs;
+-        let t = self.clock;
++        #[cfg(feature = "prof")]
++        let mut tt = std::time::Instant::now();
++        #[cfg(feature = "prof")]
++        macro_rules! lap { ($i:expr) => {{ let n = std::time::Instant::now(); PROF[$i].fetch_add((n - tt).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed); tt = n; }}; }
++        #[cfg(not(feature = "prof"))]
++        macro_rules! lap { ($i:expr) => {}; }
++        // Move port: the articulators step `ctrl_div` times per geometry update
++        let div = self.ctrl_div;
++        let dt_all = self.ctrl_every as f64 / self.fs;
++        let dt = dt_all / div as f64;
+         let mut breath_act = 0.0;
+         let mut breath_val = 0.0;
+         let mut f0_target = self.source.f0;
++        for _sub in 0..div {
++        let t = self.clock;
++        breath_act = 0.0;
++        breath_val = 0.0;
++        f0_target = self.source.f0;
+         if self.score.size() > 0 {
+             self.score.blend_all(t, &mut self.blend);
+             let b = &self.blend;
+@@ -474,14 +521,20 @@ impl HumanVoice {
+             self.score_f0 = None;
+         }
+         self.clock += dt;
++        }
++        let dt = dt_all;
++        lap!(5);
+         // contact constraint on the frame computed anyway; re-apply only if a correction was made
+         let x = self.artic.x;
+         self.airway.apply(&x, dt);
++        lap!(6);
+         if self.enforce_contacts() {
+             let x = self.artic.x;
+             self.airway.reapply(&x);
+         }
++        lap!(7);
+         self.airway.net.begin_block(self.ctrl_every);
++        lap!(8);
+         self.ctrl_counter = self.ctrl_every as i64;
+         // breath: fast attack, slower release; a speaking score breathes on its own
+         // a negative breath gesture (ingressive: inward K snares, gasps) overrides the performer's breath

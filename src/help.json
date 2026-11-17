@@ -1,0 +1,108 @@
+{
+  "title": "CHIMERA",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "A modeled voice:",
+        "every sound comes",
+        "from a simulated",
+        "airway - lungs,",
+        "vocal folds,",
+        "tongue, lips, nose.",
+        "No samples.",
+        "",
+        "One voice at a",
+        "time. Pick a mode",
+        "on the Play page."
+      ]
+    },
+    {
+      "title": "Sing",
+      "lines": [
+        "Each key sings the",
+        "next syllable of",
+        "the lyrics at its",
+        "pitch.",
+        "",
+        "Hold a key while",
+        "playing the next:",
+        "legato. Velocity:",
+        "breath.",
+        "",
+        "Words: built-in",
+        "lyrics. Lyrics:",
+        "click to type your",
+        "own. Again: back",
+        "to the first word."
+      ]
+    },
+    {
+      "title": "Vowel",
+      "lines": [
+        "Keys set pitch and",
+        "breathe. Shape the",
+        "sound by hand on",
+        "Mouth and Throat.",
+        "",
+        "Vowel jumps the",
+        "mouth to a vowel;",
+        "the knobs follow.",
+        "Hold: drone with",
+        "no key down."
+      ]
+    },
+    {
+      "title": "Beatbox",
+      "lines": [
+        "Pads by note name:",
+        "C  kick",
+        "C# lip pop",
+        "D  snare",
+        "D# rimshot",
+        "E  hi-hat",
+        "F  open hat",
+        "F# tongue click",
+        "G  inward snare",
+        "G# crash",
+        "A-B hum (bass)",
+        "",
+        "Beat plays while",
+        "Move's transport",
+        "runs, in time."
+      ]
+    },
+    {
+      "title": "Creatures",
+      "lines": [
+        "Songbird, Seal,",
+        "Gator, Elephant.",
+        "",
+        "Keys: Pitch plays",
+        "the creature at the",
+        "key's pitch while",
+        "held. The others",
+        "play that call at",
+        "the key's pitch.",
+        "Hold: keep it",
+        "breathing."
+      ]
+    },
+    {
+      "title": "Setup",
+      "lines": [
+        "Engine: Light runs",
+        "a lighter airway",
+        "(about 20% of a",
+        "core). Full is the",
+        "original (about",
+        "60%; CM5 only).",
+        "",
+        "Buffer: Low 6 ms,",
+        "Normal 12 ms, Safe",
+        "23 ms. Raise it if",
+        "you hear dropouts."
+      ]
+    }
+  ]
+}

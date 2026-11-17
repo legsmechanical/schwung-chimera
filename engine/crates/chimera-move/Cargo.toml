@@ -1,0 +1,13 @@
+[package]
+name = "chimera-move"
+description = "CHIMERA on Ableton Move: the performer (keys -> sung syllables, vowels, beatbox, creatures) behind a C ABI for the Schwung plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+chimera = { path = "../chimera" }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
