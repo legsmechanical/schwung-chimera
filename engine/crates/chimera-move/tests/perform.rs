@@ -127,3 +127,27 @@ fn a_vowel_publishes_the_mouth() {
     assert!(got.get(&(P_ROUND as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
     assert!(got.get(&(P_PROTRUDE as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
 }
+
+#[test]
+fn the_close_mic_brings_beatbox_up_to_the_voice() {
+    let mut c = Chimera::new(FS, true, None);
+    let level = |c: &mut Chimera| {
+        c.set(P_MODE, 2.0);
+        let mut x = Vec::new();
+        for n in [36u8, 38, 40, 36, 38, 40] {
+            c.note_on(n, 100);
+            x.extend(run(c, 0.25));
+        }
+        x
+    };
+    c.set(P_MIC, 0.0);
+    let dry = level(&mut c);
+    c.set(P_MODE, 0.0);
+    c.set(P_MIC, 1.0);
+    let wet = level(&mut c);
+    let (d, w) = (check("beatbox dry", &dry), check("beatbox close mic", &wet));
+    let peak = wet.iter().fold(0f32, |m, s| m.max(s.abs()));
+    println!("close mic peak {peak:.3}");
+    assert!(w > 4.0 * d, "close mic {w} vs dry {d}");
+    assert!(peak <= 0.892, "limiter: peak {peak}");
+}

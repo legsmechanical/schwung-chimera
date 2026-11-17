@@ -230,7 +230,6 @@ static void *worker(void *arg) {
     uint32_t ids[32];
     double vals[32];
     while (!atomic_load(&in->stop)) {
-        int rebuild = 0;
         uint64_t w = atomic_load_explicit(&in->aud_w, memory_order_relaxed);
         for (;;) {
             /* commands first, so a note lands in the very next block rendered */
@@ -238,9 +237,8 @@ static void *worker(void *arg) {
                 switch (c.type) {
                 case CMD_SET:
                     if (c.id >= CP_COUNT) break;
-                    if (c.id == CP_QUALITY && (c.v < 0.5) != (wsp->val[CP_QUALITY] < 0.5)) rebuild = 1;
                     if (!cp_params[c.id].trigger) wsp->val[c.id] = c.v;
-                    if (c.id != CP_QUALITY && c.id != CP_LATENCY) chm_set(h, c.id, c.v);
+                    if (c.id != CP_LATENCY) chm_set(h, c.id, c.v);
                     break;
                 case CMD_NOTE_ON: chm_note_on(h, c.a, c.b); break;
                 case CMD_NOTE_OFF: chm_note_off(h, c.a); break;
@@ -251,12 +249,6 @@ static void *worker(void *arg) {
                     chm_set_lyrics(h, wsp->lyrics);
                     break;
                 }
-            }
-            if (rebuild) {
-                /* the vowel published its mouth into ws already: rebuild from the worker's copy */
-                chm_destroy(h);
-                h = build_engine(in, wsp);
-                rebuild = 0;
             }
             uint64_t r = atomic_load_explicit(&in->aud_r, memory_order_acquire);
             int target = kLatencyBlocks[atomic_load(&in->latency)] * BLOCK;

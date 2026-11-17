@@ -16,6 +16,7 @@
 //! - Songbird / Seal / Gator / Elephant: the key sets the creature's pitch and breathes, or plays
 //!   one of its calls at that pitch (the Keys param).
 
+mod mic;
 mod params_gen;
 pub mod sing;
 
@@ -55,6 +56,9 @@ pub struct Chimera {
     /// beatbox: the sequencer is locked to the transport
     beat_synced: bool,
     gain: f32,
+    /// beatbox's close-mic chain, and the output limiter every mode goes through
+    mic: mic::Mic,
+    limiter: mic::Limiter,
     /// values the controller changed itself (a vowel sets the mouth, a pattern its swing), for
     /// the plugin's mirror
     published: Vec<(usize, f64)>,
@@ -112,6 +116,8 @@ impl Chimera {
             body_rest: 0.0,
             beat_synced: false,
             gain: DEFAULTS[P_VOLUME] as f32,
+            mic: mic::Mic::new(fs),
+            limiter: mic::Limiter::new(fs),
             published: Vec::new(),
         };
         c.sing.set_lyrics(params_gen_default_lyrics(), &c.g2p);
@@ -180,9 +186,24 @@ impl Chimera {
                 P_SWING => self.eng.set_beat_tempo(None, Some(v)),
                 P_RESTART => self.sing.restart(),
                 P_MODE if !all => self.enter_mode(v as usize),
+                P_MIC => self.mic.reset(),
+                P_QUALITY if !all => self.set_quality(v < 0.5),
                 _ => {}
             },
         }
+    }
+
+    /// Engine: Light or Full. A new engine with every param sent again; the dictionary (the slow
+    /// part of starting up) is kept.
+    fn set_quality(&mut self, light: bool) {
+        if light == self.eng.is_light() {
+            return;
+        }
+        self.sing.stop(&mut self.eng);
+        self.held.clear();
+        self.eng = Engine::with_light(self.fs, light);
+        self.beat_synced = false;
+        self.apply_all();
     }
 
     /// Set a param (the plugin's set_param / a preset / a restored state).
@@ -424,9 +445,14 @@ impl Chimera {
             }
         }
         self.eng.render(out);
-        let g = self.gain;
+        let g = self.gain as f64;
+        let mic = self.mode() == MODE_BEAT && self.p[P_MIC] > 0.5;
         for s in out.iter_mut() {
-            *s *= g;
+            let mut x = *s as f64;
+            if mic {
+                x = self.mic.run(x);
+            }
+            *s = self.limiter.run(x * g) as f32;
         }
     }
 

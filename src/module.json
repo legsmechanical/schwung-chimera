@@ -887,6 +887,17 @@
      "SAF"
     ],
     "default": 1
+   },
+   {
+    "key": "mic",
+    "name": "Close Mic",
+    "short_name": "Mic",
+    "type": "enum",
+    "options": [
+     "Off",
+     "On"
+    ],
+    "default": 1
    }
   ]
  }

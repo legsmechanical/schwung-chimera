@@ -84,7 +84,8 @@
     {"key": "el_pitch", "name": "Pitch", "type": "float", "min": 8, "max": 45, "step": 0.1, "unit": "Hz", "default": 14, "creature": ["elephant", "pitch"]},
 
     {"key": "quality", "name": "Quality", "short": "Engine", "type": "enum", "options": ["Light", "Full"], "default": 0},
-    {"key": "latency", "name": "Latency", "short": "Buffer", "type": "enum", "options": ["Low", "Normal", "Safe"], "short_options": ["LOW", "NRM", "SAF"], "default": 1}
+    {"key": "latency", "name": "Latency", "short": "Buffer", "type": "enum", "options": ["Low", "Normal", "Safe"], "short_options": ["LOW", "NRM", "SAF"], "default": 1},
+    {"key": "mic", "name": "Close Mic", "short": "Mic", "type": "enum", "options": ["Off", "On"], "default": 1}
   ],
   "pages": [
     {"level": "play", "label": "Play", "keys": [
@@ -94,6 +95,7 @@
       {"key": "restart", "visible_if": {"param": "mode", "equals": 0}},
       {"key": "pattern", "visible_if": {"param": "mode", "equals": 2}},
       {"key": "swing", "visible_if": {"param": "mode", "equals": 2}},
+      {"key": "mic", "visible_if": {"param": "mode", "equals": 2}},
       "volume"]},
     {"level": "voice", "label": "Voice", "visible_if": {"param": "mode", "lt": 3}, "keys": [
       "female", "child", "breath", "pressed", "vibrato", "vib_rate", "glide",
