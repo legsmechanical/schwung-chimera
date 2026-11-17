@@ -24,7 +24,7 @@ fn check(name: &str, x: &[f32]) -> f64 {
 }
 
 fn dict() -> Option<Vec<u8>> {
-    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/cmudict.txt.gz")).ok()
+    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../public/data/cmudict.txt.gz")).ok()
 }
 
 #[test]

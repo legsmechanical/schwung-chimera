@@ -55,9 +55,9 @@ LIB="build/cargo/aarch64-unknown-linux-gnu/release/libchimera_move.a"
 echo "Packaging..."
 cp src/module.json src/ui.js src/help.json "dist/$ID/"
 cp build/arm/dsp.so "dist/$ID/dsp.so"
-cp engine/data/cmudict.txt.gz "dist/$ID/cmudict.txt.gz"
+cp engine/public/data/cmudict.txt.gz "dist/$ID/cmudict.txt.gz"
 cp LICENSE "dist/$ID/LICENSE"
-cp engine/data/CMUDICT-LICENSE.txt "dist/$ID/CMUDICT-LICENSE.txt"
+cp engine/public/data/CMUDICT-LICENSE.txt "dist/$ID/CMUDICT-LICENSE.txt"
 
 # Release checks: nothing dynamic beyond libc/libm/libdl/libpthread, no glibc symbol newer than
 # a stock Move provides, and one exported function.

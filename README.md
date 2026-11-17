@@ -44,4 +44,4 @@ until the host restarts.
 ## License
 
 MIT, as is the CHIMERA engine (`engine/`). The CMU Pronouncing Dictionary keeps its own license
-(`engine/data/CMUDICT-LICENSE.txt`). Build notes are in [DEVELOPMENT.md](DEVELOPMENT.md).
+(`engine/public/data/CMUDICT-LICENSE.txt`). Build notes are in [DEVELOPMENT.md](DEVELOPMENT.md).
