@@ -349,6 +349,8 @@ pub struct AirwayNetwork {
     /// ports driven per sample (`set_port_area`: the glottis, syrinx valves): the fast path
     /// solves these from their current area every sample
     port_live: Vec<bool>,
+    /// fast path: per-sample sum of 1/L of the live ports at each live junction (see `FastCache::live_j`)
+    live_il: Vec<f64>,
 }
 
 #[cfg(feature = "prof")]
@@ -387,6 +389,16 @@ struct FastCache {
     d_rad_lr: Vec<f64>,
     d_rad_h: Vec<f64>,
     d_rad_g: Vec<f64>,
+    /// junctions next to a live port: their compliance floor needs the port's inertance, which
+    /// changes every sample (a glottis closed at the refresh and open three samples later), so
+    /// these nodes take their floor per sample from `lsum_fix` (the other branches, ramped
+    /// with the span) plus the live ports' current 1/L, and their raw compliance `c_raw`
+    live_j: Vec<bool>,
+    live_nodes: Vec<usize>,
+    lsum_fix: Vec<f64>,
+    d_lsum_fix: Vec<f64>,
+    c_raw: Vec<f64>,
+    d_c_raw: Vec<f64>,
     primed: bool,
     /// the moving-wall injection is zero and its filters have decayed: skip them
     vol_idle: bool,
@@ -498,6 +510,7 @@ impl AirwayNetwork {
             geo_count: 0,
             fc: FastCache::default(),
             port_live: Vec::new(),
+            live_il: Vec::new(),
         }
     }
 
@@ -1248,10 +1261,13 @@ impl AirwayNetwork {
         }
         if fc.tc.len() != n {
             fc.primed = false;
-            for v in [&mut fc.tc, &mut fc.cn_num, &mut fc.cn_den_inv, &mut fc.wall_a, &mut fc.wall_b, &mut fc.wall_coef, &mut fc.d_tc, &mut fc.d_cn_num, &mut fc.d_cn_den_inv, &mut fc.d_wall_coef] {
+            for v in [&mut fc.tc, &mut fc.cn_num, &mut fc.cn_den_inv, &mut fc.wall_a, &mut fc.wall_b, &mut fc.wall_coef, &mut fc.d_tc, &mut fc.d_cn_num, &mut fc.d_cn_den_inv, &mut fc.d_wall_coef, &mut fc.lsum_fix, &mut fc.d_lsum_fix, &mut fc.c_raw, &mut fc.d_c_raw] {
                 *v = vec![0.0; n];
             }
             fc.sealed = vec![false; n];
+            fc.live_j = vec![false; n];
+            fc.live_nodes = Vec::with_capacity(n);
+            self.live_il = vec![0.0; n];
         }
         let nr = self.rad_nodes.len();
         if fc.rad_lr.len() != nr {
@@ -1324,6 +1340,25 @@ impl AirwayNetwork {
         if fc.vol_idle {
             self.vol_src1[..n].fill(0.0);
             self.vol_src2[..n].fill(0.0);
+        }
+        // live junctions: a non-radiating junction at either end of a port driven per sample
+        for i in 0..fc.live_nodes.len() {
+            let k = fc.live_nodes[i];
+            fc.live_j[k] = false;
+        }
+        fc.live_nodes.clear();
+        if self.enable_junction_floor {
+            for j in 0..nb {
+                if self.b_kind[j] == KIND_SERIES || !self.port_live[j] {
+                    continue;
+                }
+                for k in [self.b_a[j], self.b_b[j]] {
+                    if self.is_junction[k] && self.rad_of[k] < 0 && !self.fixed[k] && !fc.live_j[k] {
+                        fc.live_j[k] = true;
+                        fc.live_nodes.push(k);
+                    }
+                }
+            }
         }
         // 2) branch elements
         let visc = sqrt((RHO * MU * self.viscous_omega) / 2.0) * self.viscous_scale;
@@ -1412,8 +1447,14 @@ impl AirwayNetwork {
             ramp_to(&mut fc.kb4[j], &mut fc.d_kb4[j], 4.0 * kb, inv_g, snap);
             if self.is_junction[a] | self.is_junction[b] {
                 let il = 1.0 / l;
-                self.inv_lsum[a] += il;
-                self.inv_lsum[b] += il;
+                // a live port's share at a live junction is added per sample instead
+                let live = self.b_kind[j] != KIND_SERIES && self.port_live[j];
+                if !(live && fc.live_j[a]) {
+                    self.inv_lsum[a] += il;
+                }
+                if !(live && fc.live_j[b]) {
+                    self.inv_lsum[b] += il;
+                }
             }
         }
         // 3) node elements
@@ -1439,6 +1480,11 @@ impl AirwayNetwork {
                 continue;
             }
             let mut c = self.vol[k] / RHO_C2;
+            if fc.live_j[k] {
+                ramp_to(&mut fc.c_raw[k], &mut fc.d_c_raw[k], c, inv_g, snap);
+                ramp_to(&mut fc.lsum_fix[k], &mut fc.d_lsum_fix[k], self.inv_lsum[k], inv_g, snap);
+                continue;
+            }
             if self.is_junction[k] && self.enable_junction_floor {
                 let c_min = (t2 * self.inv_lsum[k]) / 2.4;
                 if c < c_min {
@@ -1505,6 +1551,11 @@ impl AirwayNetwork {
                 fc.rad_h[r] += fc.d_rad_h[r];
                 fc.rad_g[r] += fc.d_rad_g[r];
             }
+            for &k in &fc.live_nodes {
+                fc.c_raw[k] += fc.d_c_raw[k];
+                fc.lsum_fix[k] += fc.d_lsum_fix[k];
+                self.live_il[k] = 0.0;
+            }
         }
         lap!(1);
         for k in 0..n {
@@ -1533,6 +1584,7 @@ impl AirwayNetwork {
             let flow_sum = &mut self.flow_sum[..n];
             let (b_a, b_b) = (&self.b_a[..nb], &self.b_b[..nb]);
             let (u_arr, mom, l_prev, psrc) = (&mut self.u[..nb], &mut self.mom[..nb], &mut self.l_prev[..nb], &self.psrc[..nb]);
+            let live_il = &mut self.live_il[..n];
             let visc = sqrt((RHO * MU * self.viscous_omega) / 2.0) * self.viscous_scale;
             let half_rho = 0.5 * RHO;
             let closed_a = self.closed_area;
@@ -1573,6 +1625,13 @@ impl AirwayNetwork {
                     inv_bq = 1.0 / bq;
                     kf4 = 4.0 * kf;
                     kb4 = 4.0 * kb;
+                    let il = 1.0 / ll;
+                    if fc.live_j[a] {
+                        live_il[a] += il;
+                    }
+                    if fc.live_j[b] {
+                        live_il[b] += il;
+                    }
                 } else {
                     if fc.closed[j] {
                         u_arr[j] = 0.0;
@@ -1650,7 +1709,12 @@ impl AirwayNetwork {
                 continue;
             }
             let r = self.rad_of[k];
-            if r < 0 {
+            if self.fc.live_j[k] {
+                // the exact path's floor, from this sample's port inertances
+                let c_min = (t * t * (self.fc.lsum_fix[k] + self.live_il[k])) / 2.4;
+                let c = if self.fc.c_raw[k] < c_min { c_min } else { self.fc.c_raw[k] };
+                self.p[k] += (t / c) * self.flow_sum[k];
+            } else if r < 0 {
                 self.p[k] += self.fc.tc[k] * self.flow_sum[k];
             } else {
                 let r = r as usize;

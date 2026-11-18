@@ -24,6 +24,7 @@ use chimera::anatomy::human::{ArticKey, ArticPatch, BodyMix};
 use chimera::creatures::creature_by_id;
 use chimera::engine::Engine;
 use chimera::math::midi_to_hz;
+use chimera::control::beat_player::BeatPlayer;
 use chimera::phonetics::beatbox::{BEAT_PRESETS, BeatStep, beat_ready, parse_beat};
 use chimera::phonetics::english::EnglishG2P;
 use chimera::phonetics::planner::vowel_artic;
@@ -59,8 +60,8 @@ pub struct Chimera {
     /// beatbox's close-mic chain, and the output limiter every mode goes through
     mic: mic::Mic,
     limiter: mic::Limiter,
-    /// values the controller changed itself (a vowel sets the mouth, a pattern its swing), for
-    /// the plugin's mirror
+    /// values the controller changed itself (picking a vowel sets the mouth, picking a pattern
+    /// its swing), for the plugin's mirror
     published: Vec<(usize, f64)>,
 }
 
@@ -180,14 +181,14 @@ impl Chimera {
                 P_VIBRATO => self.update_vibrato(),
                 P_WHISPER => self.eng.set_source(&SourcePatch { voiced: Some(v < 0.5), ..Default::default() }),
                 P_VOLUME => self.gain = v as f32,
-                P_HOLD | P_SB_HOLD | P_SE_HOLD | P_GA_HOLD | P_EL_HOLD => self.update_gate(),
-                P_VOWEL if !all => self.set_vowel(v as usize),
-                P_PATTERN => self.set_pattern(v as usize, !all),
+                // Keys decides whether a held key breathes (Pitch) or plays a call
+                P_HOLD | P_SB_HOLD | P_SE_HOLD | P_GA_HOLD | P_EL_HOLD | P_SB_KEYS | P_SE_KEYS | P_GA_KEYS | P_EL_KEYS => self.update_gate(),
+                // a set Vowel is only remembered: the mouth is its own knobs (a restored state's,
+                // a preset's); `pick_vowel` is what moves the mouth to the vowel
+                P_PATTERN => self.set_pattern(v as usize, false),
                 P_SWING => self.eng.set_beat_tempo(None, Some(v)),
-                P_RESTART => self.sing.restart(),
                 P_MODE if !all => self.enter_mode(v as usize),
                 P_MIC => self.mic.reset(),
-                P_QUALITY if !all => self.set_quality(v < 0.5),
                 _ => {}
             },
         }
@@ -195,7 +196,7 @@ impl Chimera {
 
     /// Engine: Light or Full. A new engine with every param sent again; the dictionary (the slow
     /// part of starting up) is kept.
-    fn set_quality(&mut self, light: bool) {
+    pub fn set_light(&mut self, light: bool) {
         if light == self.eng.is_light() {
             return;
         }
@@ -206,7 +207,8 @@ impl Chimera {
         self.apply_all();
     }
 
-    /// Set a param (the plugin's set_param / a preset / a restored state).
+    /// Set a param (the plugin's set_param / a preset / a restored state). Writing the value a
+    /// param already has does nothing: scenes and LFOs re-write values every block.
     pub fn set(&mut self, id: usize, v: f64) {
         if id >= N_PARAMS || !v.is_finite() {
             return;
@@ -216,6 +218,9 @@ impl Chimera {
             return;
         }
         let prev = self.p[id];
+        if prev == v {
+            return;
+        }
         self.p[id] = v;
         if id == P_MODE {
             if (prev as usize) != (v as usize) {
@@ -299,11 +304,27 @@ impl Chimera {
         self.update_gate();
     }
 
-    /// Vowel picked: the mouth moves to its calibrated posture for this body, and the mouth
-    /// knobs follow (published back to the plugin).
+    /// The player picked a vowel: the mouth moves to its calibrated posture and the mouth knobs
+    /// follow (published back to the plugin).
+    pub fn pick_vowel(&mut self, i: usize) {
+        if i >= VOWEL_IPA.len() {
+            return;
+        }
+        self.p[P_VOWEL] = i as f64;
+        self.set_vowel(i);
+    }
+
+    /// The player picked a pattern: its steps, and its own swing (published back).
+    pub fn pick_pattern(&mut self, i: usize) {
+        self.p[P_PATTERN] = i as f64;
+        self.set_pattern(i, true);
+    }
+
+    /// The vowel's posture for the body the knobs ask for (during a body change's settle time
+    /// the engine still has the old one; the posture is the new body's, which is what stays).
     fn set_vowel(&mut self, i: usize) {
         let Some(ipa) = VOWEL_IPA.get(i) else { return };
-        let Some(patch) = vowel_artic(ipa, self.body) else { return };
+        let Some(patch) = vowel_artic(ipa, self.body_mix()) else { return };
         for id in 0..N_PARAMS {
             if let Drive::Artic(k, lo, hi) = DRIVES[id]
                 && let Some(x) = patch.get(ArticKey::ALL[k])
@@ -319,7 +340,7 @@ impl Chimera {
         }
     }
 
-    /// Pattern picked: its steps, and its own swing (published back).
+    /// A pattern's steps, and with `take_swing` its own swing (published back).
     fn set_pattern(&mut self, i: usize, take_swing: bool) {
         if i == 0 {
             self.eng.set_beat_playing(false);
@@ -346,9 +367,21 @@ impl Chimera {
             }
             return;
         }
-        // locked: re-anchor only when the tempo changed or the phase drifted by > 1/50 beat
+        // a tempo outside what a beatboxer can play is followed at half or double time
+        let (mut beat, mut bpm) = (beat, bpm);
+        while bpm > BeatPlayer::MAX_BPM {
+            bpm *= 0.5;
+            beat *= 0.5;
+        }
+        while bpm < BeatPlayer::MIN_BPM {
+            bpm *= 2.0;
+            beat *= 2.0;
+        }
+        // locked: re-anchor when the tempo moved by more than 0.1% (Move's measured tempo
+        // wobbles in its last digits from beat to beat), or the phase drifted by > 1/50 beat, or
+        // the transport jumped. A re-anchor never skips or repeats a step.
         let drift = (self.eng.beat().beat_at(self.eng.voice().clock) - beat).abs();
-        if !self.beat_synced || (self.eng.beat().bpm - bpm).abs() > 0.01 || drift > 0.02 {
+        if !self.beat_synced || (self.eng.beat().bpm - bpm).abs() > bpm * 1e-3 || drift > 0.02 {
             self.eng.sync_beat(beat, bpm);
             self.beat_synced = true;
         }
@@ -470,6 +503,11 @@ impl Chimera {
     pub fn next_syllable(&self) -> &str {
         self.sing.next_text()
     }
+
+    /// The beat step under the playhead (−1 when the pattern is not playing).
+    pub fn beat_step(&self) -> i64 {
+        self.eng.beat_step()
+    }
 }
 
 fn params_gen_default_lyrics() -> &'static str {
@@ -477,87 +515,151 @@ fn params_gen_default_lyrics() -> &'static str {
 }
 
 // ------------------------------------------------------------------------------------ C ABI
+//
+// A panic must never cross into C (undefined behaviour) nor abort the host process, which would
+// take Move's whole audio down with it. Every entry point runs under `catch_unwind`; after a
+// panic the engine is marked failed, renders silence and ignores everything else, and the
+// plugin reports it through `get_error` / `load_error`.
 
-/// Build an engine (allocates; call on the render thread). `dict_path` may be NULL.
+pub struct Handle {
+    c: Option<Chimera>,
+}
+
+fn guard(h: *mut Handle, f: impl FnOnce(&mut Chimera)) {
+    if h.is_null() {
+        return;
+    }
+    let h = unsafe { &mut *h };
+    let Some(c) = h.c.as_mut() else { return };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(c))).is_err() {
+        h.c = None;
+    }
+}
+
+/// Build an engine (allocates; call on the render thread). `dict_path` may be NULL. NULL when
+/// the engine could not be built.
 ///
 /// # Safety
 /// `dict_path` is NULL or a NUL-terminated path.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_create(sample_rate: f64, light: i32, dict_path: *const c_char) -> *mut Chimera {
+pub unsafe extern "C" fn chm_create(sample_rate: f64, light: i32, dict_path: *const c_char) -> *mut Handle {
     let dict = if dict_path.is_null() {
         None
     } else {
         unsafe { CStr::from_ptr(dict_path) }.to_str().ok().and_then(|p| std::fs::read(p).ok())
     };
-    Box::into_raw(Box::new(Chimera::new(sample_rate, light != 0, dict.as_deref())))
+    match std::panic::catch_unwind(|| Chimera::new(sample_rate, light != 0, dict.as_deref())) {
+        Ok(c) => Box::into_raw(Box::new(Handle { c: Some(c) })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// # Safety
-/// `h` came from `chm_create` and is not used again.
+/// `h` came from `chm_create` (or is NULL) and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_destroy(h: *mut Chimera) {
+pub unsafe extern "C" fn chm_destroy(h: *mut Handle) {
     if !h.is_null() {
-        drop(unsafe { Box::from_raw(h) });
+        let b = unsafe { Box::from_raw(h) };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(b)));
     }
+}
+
+/// 1 once the engine has failed (a panic inside it); it then renders silence.
+///
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_failed(h: *mut Handle) -> i32 {
+    (h.is_null() || unsafe { &*h }.c.is_none()) as i32
 }
 
 /// # Safety
 /// `h` is live; `out` holds `n` floats.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_render(h: *mut Chimera, out: *mut f32, n: usize) {
-    let (h, out) = unsafe { (&mut *h, std::slice::from_raw_parts_mut(out, n)) };
-    h.render(out);
+pub unsafe extern "C" fn chm_render(h: *mut Handle, out: *mut f32, n: usize) {
+    let out = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    let mut done = false;
+    guard(h, |c| {
+        c.render(out);
+        done = true;
+    });
+    if !done {
+        out.fill(0.0);
+    }
 }
 
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_set(h: *mut Chimera, id: u32, v: f64) {
-    unsafe { &mut *h }.set(id as usize, v);
+pub unsafe extern "C" fn chm_set(h: *mut Handle, id: u32, v: f64) {
+    guard(h, |c| c.set(id as usize, v));
+}
+
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_pick_vowel(h: *mut Handle, i: u32) {
+    guard(h, |c| c.pick_vowel(i as usize));
+}
+
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_pick_pattern(h: *mut Handle, i: u32) {
+    guard(h, |c| c.pick_pattern(i as usize));
+}
+
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_set_light(h: *mut Handle, light: i32) {
+    guard(h, |c| c.set_light(light != 0));
 }
 
 /// # Safety
 /// `h` is live; `text` is NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_set_lyrics(h: *mut Chimera, text: *const c_char) {
+pub unsafe extern "C" fn chm_set_lyrics(h: *mut Handle, text: *const c_char) {
     let t = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    unsafe { &mut *h }.set_lyrics(&t);
+    guard(h, |c| c.set_lyrics(&t));
 }
 
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_note_on(h: *mut Chimera, note: u8, velocity: u8) {
-    unsafe { &mut *h }.note_on(note & 0x7f, velocity & 0x7f);
+pub unsafe extern "C" fn chm_note_on(h: *mut Handle, note: u8, velocity: u8) {
+    guard(h, |c| c.note_on(note & 0x7f, velocity & 0x7f));
 }
 
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_note_off(h: *mut Chimera, note: u8) {
-    unsafe { &mut *h }.note_off(note & 0x7f);
+pub unsafe extern "C" fn chm_note_off(h: *mut Handle, note: u8) {
+    guard(h, |c| c.note_off(note & 0x7f));
 }
 
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_all_notes_off(h: *mut Chimera) {
-    unsafe { &mut *h }.all_notes_off();
+pub unsafe extern "C" fn chm_all_notes_off(h: *mut Handle) {
+    guard(h, |c| c.all_notes_off());
 }
 
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_transport(h: *mut Chimera, beat: f64, bpm: f64) {
-    unsafe { &mut *h }.transport(beat, bpm);
+pub unsafe extern "C" fn chm_transport(h: *mut Handle, beat: f64, bpm: f64) {
+    guard(h, |c| c.transport(beat, bpm));
 }
 
 /// # Safety
 /// `h` is live; `ids` and `vals` hold `max` entries.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_take_published(h: *mut Chimera, ids: *mut u32, vals: *mut f64, max: usize) -> usize {
-    let (h, ids, vals) = unsafe { (&mut *h, std::slice::from_raw_parts_mut(ids, max), std::slice::from_raw_parts_mut(vals, max)) };
-    h.take_published(ids, vals)
+pub unsafe extern "C" fn chm_take_published(h: *mut Handle, ids: *mut u32, vals: *mut f64, max: usize) -> usize {
+    let (ids, vals) = unsafe { (std::slice::from_raw_parts_mut(ids, max), std::slice::from_raw_parts_mut(vals, max)) };
+    let mut n = 0;
+    guard(h, |c| n = c.take_published(ids, vals));
+    n
 }
 
 /// The next syllable, NUL-terminated into `buf` (cut at a character boundary). Returns its length.
@@ -565,17 +667,47 @@ pub unsafe extern "C" fn chm_take_published(h: *mut Chimera, ids: *mut u32, vals
 /// # Safety
 /// `h` is live; `buf` holds `cap` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_next_syllable(h: *mut Chimera, buf: *mut u8, cap: usize) -> usize {
+pub unsafe extern "C" fn chm_next_syllable(h: *mut Handle, buf: *mut u8, cap: usize) -> usize {
     if cap == 0 {
         return 0;
     }
-    let (h, buf) = unsafe { (&*h, std::slice::from_raw_parts_mut(buf, cap)) };
-    let s = h.next_syllable();
-    let mut n = s.len().min(cap - 1);
-    while !s.is_char_boundary(n) {
-        n -= 1;
-    }
-    buf[..n].copy_from_slice(&s.as_bytes()[..n]);
-    buf[n] = 0;
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
+    buf[0] = 0;
+    let mut n = 0;
+    guard(h, |c| {
+        let s = c.next_syllable();
+        let mut k = s.len().min(cap - 1);
+        while !s.is_char_boundary(k) {
+            k -= 1;
+        }
+        buf[..k].copy_from_slice(&s.as_bytes()[..k]);
+        buf[k] = 0;
+        n = k;
+    });
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_inside_the_engine_is_contained() {
+        let h = unsafe { chm_create(44100.0, 1, std::ptr::null()) };
+        assert!(!h.is_null());
+        assert_eq!(unsafe { chm_failed(h) }, 0);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        guard(h, |_| panic!("test"));
+        std::panic::set_hook(hook);
+        assert_eq!(unsafe { chm_failed(h) }, 1);
+        // every call after is a no-op, and the audio is silence
+        let mut out = [1f32; 128];
+        unsafe {
+            chm_note_on(h, 60, 100);
+            chm_render(h, out.as_mut_ptr(), out.len());
+        }
+        assert!(out.iter().all(|&s| s == 0.0));
+        unsafe { chm_destroy(h) };
+    }
 }

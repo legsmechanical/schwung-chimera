@@ -4,7 +4,13 @@
  * transport for the beatbox pattern. Reports how long the engine takes to come up, underruns,
  * output level per mode, and the slowest render_block call. Writes the audio to a WAV.
  *
- *   probe <module dir> <out.wav>          (on the Move: built by scripts/build_probe.sh)
+ *   probe <module dir> <out.wav>          (on the Move, from a COPY of dist/chimera: it writes
+ *                                          and removes <module dir>/config.json)
+ *
+ *   build: docker run --rm -v "$PWD:/build" -u "$(id -u):$(id -g)" -w /build chimera-builder \
+ *            aarch64-linux-gnu-gcc -O2 -std=gnu11 -Wall tests/probe.c -o build/probe -ldl -lm
+ *   run:   scp -r dist/chimera build/probe ableton@move.local:/data/UserData/chimera-probe/
+ *          ssh ableton@move.local 'cd /data/UserData/chimera-probe && taskset -c 3 ./probe chimera out.wav'
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -33,6 +39,7 @@ static void *inst;
 static int16_t *wav;
 static size_t wav_n, wav_cap;
 static double worst_call;
+static int failures;
 
 static double cpu_s(void) {
     struct timespec t;
@@ -159,21 +166,60 @@ int main(int argc, char **argv) {
     run(0.6);
     printf("female note rms %.4f       ", rb);
     status("");
-    /* a preset, a state round trip, the Full engine */
+    /* a preset, a state round trip */
     api->set_param(inst, "preset", "3");
     api->get_param(inst, "preset_name", buf, sizeof buf);
     printf("preset 3                   %s\n", buf);
     n = api->get_param(inst, "state", buf, sizeof buf);
     printf("state                      %d bytes\n", n);
     api->set_param(inst, "state", buf);
-    api->set_param(inst, "quality", "Full");
-    run(1.0);
+
+    /* a saved mouth survives a reload: pick a vowel, move the jaw and the swing, save, and
+     * restore into a fresh instance (the vowel's posture must not overwrite the saved knobs) */
+    api->set_param(inst, "mode", "1");
+    api->set_param(inst, "vowel", "9");
+    run(0.3);
+    api->set_param(inst, "jaw", "0.9100");
+    api->set_param(inst, "pattern", "3");
+    run(0.1);
+    api->set_param(inst, "swing", "0.4700");
+    run(0.2);
+    n = api->get_param(inst, "state", buf, sizeof buf);
+    void *inst2 = api->create_instance(argv[1], "{}");
+    api->set_param(inst2, "state", buf);
+    {
+        void *keep = inst;
+        inst = inst2;
+        run(1.5);
+        char jaw[32], sw[32], vw[32];
+        api->get_param(inst2, "jaw", jaw, sizeof jaw);
+        api->get_param(inst2, "swing", sw, sizeof sw);
+        api->get_param(inst2, "vowel", vw, sizeof vw);
+        int ok = fabs(atof(jaw) - 0.91) < 1e-3 && fabs(atof(sw) - 0.47) < 1e-3 && atoi(vw) == 9;
+        printf("restore keeps knobs        jaw %s swing %s vowel %s: %s\n", jaw, sw, vw, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+        api->destroy_instance(inst2);
+        inst = keep;
+    }
+
+    /* the Full engine, through the module's settings file (probe runs on a copy of the module) */
+    char cfg[1024];
+    snprintf(cfg, sizeof cfg, "%s/config.json", argv[1]);
+    FILE *cf = fopen(cfg, "w");
+    if (cf) {
+        fputs("{\"engine\":\"full\",\"buffer\":\"normal\"}\n", cf);
+        fclose(cf);
+    }
+    api->set_param(inst, "mode", "0");
+    run(2.5);
+    status("after engine=full");
     midi(0x90, 60, 100);
     double rf = run(0.8);
     midi(0x80, 60, 0);
     run(0.8);
     printf("full engine note rms %.4f  ", rf);
     status("");
+    remove(cfg);
     printf("slowest render_block       %.1f us (own CPU time)\n", worst_call * 1e6);
 
     t0 = now_s();
@@ -199,5 +245,6 @@ int main(int argc, char **argv) {
         fwrite(wav, 2, wav_n, f);
         fclose(f);
     }
-    return 0;
+    if (failures) printf("%d check(s) FAILED\n", failures);
+    return failures ? 1 : 0;
 }

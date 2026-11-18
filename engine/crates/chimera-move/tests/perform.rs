@@ -117,15 +117,98 @@ fn every_mode_sounds_and_stops() {
 }
 
 #[test]
-fn a_vowel_publishes_the_mouth() {
+fn a_picked_vowel_publishes_the_mouth_and_a_set_one_does_not() {
     let mut c = Chimera::new(FS, true, None);
     c.set(P_MODE, 1.0);
-    c.set(P_VOWEL, 9.0); // Oo: rounded, protruded
     let (mut ids, mut vals) = ([0u32; 32], [0f64; 32]);
+    // a restored state or a preset sets the vowel quietly: the saved mouth knobs stay
+    c.set(P_VOWEL, 9.0);
+    assert_eq!(c.take_published(&mut ids, &mut vals), 0);
+    c.pick_vowel(9); // Oo: rounded, protruded
     let n = c.take_published(&mut ids, &mut vals);
     let got: std::collections::HashMap<u32, f64> = ids[..n].iter().copied().zip(vals[..n].iter().copied()).collect();
     assert!(got.get(&(P_ROUND as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
     assert!(got.get(&(P_PROTRUDE as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
+    // a pattern: set quietly keeps the swing, picked takes the pattern's own
+    c.set(P_SWING, 0.47);
+    c.set(P_PATTERN, 3.0);
+    assert_eq!(c.take_published(&mut ids, &mut vals), 0);
+    c.pick_pattern(3);
+    let n = c.take_published(&mut ids, &mut vals);
+    assert!(n == 1 && ids[0] == P_SWING as u32, "{:?}", &ids[..n]);
+}
+
+#[test]
+fn rewriting_a_value_does_nothing() {
+    // a scene or an LFO writes every block: the close mic must not reset each time
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, 2.0);
+    c.note_on(36, 100);
+    let mut x = Vec::new();
+    for _ in 0..(0.4 * FS / 128.0) as usize {
+        c.set(P_MIC, 1.0);
+        c.set(P_PATTERN, 1.0);
+        let mut b = [0f32; 128];
+        c.render(&mut b);
+        x.extend_from_slice(&b);
+    }
+    assert!(check("kick under rewrites", &x) > 0.003);
+}
+
+/// Steps the pattern plays while the host transport runs `beats` at `bpm` (the tempo reported
+/// with `wobble`, as Move's measured tempo does), starting at `from`.
+fn steps_played(c: &mut Chimera, from: f64, beats: f64, bpm: f64, wobble: f64) -> usize {
+    let mut beat = from;
+    let (mut last, mut n) = (c.beat_step(), 0);
+    let blocks = (beats * 60.0 / bpm * FS / 128.0) as usize;
+    for i in 0..blocks {
+        let jitter = if (beat as i64) % 2 == 0 { wobble } else { -wobble };
+        c.transport(beat, bpm + jitter * (i % 3) as f64);
+        let mut b = [0f32; 128];
+        c.render(&mut b);
+        beat += 128.0 / FS * bpm / 60.0;
+        let s = c.beat_step();
+        if s != last && s >= 0 {
+            n += 1;
+        }
+        last = s;
+    }
+    n
+}
+
+#[test]
+fn the_pattern_stays_locked_to_the_transport() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, 2.0);
+    c.pick_pattern(1);
+    // warm up, then 8 beats with the tempo wobbling in its last digits: 32 steps, none skipped
+    steps_played(&mut c, 0.0, 1.0, 100.0, 0.03);
+    let n = steps_played(&mut c, 1.0, 8.0, 100.0, 0.03);
+    println!("8 beats at a wobbling 100 bpm: {n} steps");
+    assert!((31..=33).contains(&n), "{n} steps");
+    // the transport jumps back (a loop, a restart): the pattern carries on at once
+    let n = steps_played(&mut c, 0.0, 2.0, 100.0, 0.0);
+    println!("2 beats after a jump back: {n} steps");
+    assert!(n >= 6, "{n} steps after the jump");
+    // 300 bpm is followed at half time: 4 host beats = 2 pattern beats = 8 steps
+    c.transport(-1.0, 300.0);
+    run(&mut c, 0.3);
+    steps_played(&mut c, 0.0, 2.0, 300.0, 0.0);
+    let n = steps_played(&mut c, 2.0, 8.0, 300.0, 0.0);
+    println!("8 beats at 300 bpm: {n} steps");
+    assert!((15..=17).contains(&n), "{n} steps");
+}
+
+#[test]
+fn switching_keys_to_a_call_stops_the_breath() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, 3.0);
+    c.note_on(60, 100);
+    assert!(check("songbird held", &run(&mut c, 0.5)) > 0.003);
+    // still holding the key: Keys -> a call, so the held key no longer breathes
+    c.set(CREATURE_KEYS[0].0, 1.0);
+    run(&mut c, 3.0);
+    assert!(check("songbird after keys -> call", &run(&mut c, 0.5)) < 0.01);
 }
 
 #[test]

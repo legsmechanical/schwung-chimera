@@ -101,21 +101,29 @@ impl BeatPlayer {
         self.playing = false;
     }
 
-    /// Move port: play locked to a host transport that is at `beat` (quarter notes) at `clock`.
-    /// The next step after `clock` (plus the horizon, so its sound has time to set up) is
-    /// anchored at its exact time on the host's grid. Re-syncing while playing moves only steps
-    /// not yet scheduled.
+    /// Move port: play locked to a host transport that is at `beat` (quarter notes) at `clock`,
+    /// at `bpm` (the caller folds it into [`Self::MIN_BPM`, `Self::MAX_BPM`] and scales `beat`
+    /// to match; a value outside is clamped here).
+    ///
+    /// Re-syncing while playing continues from the first step not yet scheduled, placed at its
+    /// exact time on the host's grid: no step is skipped and none repeated. Starting, or a
+    /// transport jump (the host's position left the scheduled window, backwards or forwards),
+    /// anchors the first step past the horizon, so its sound has time to set up.
     pub fn sync(&mut self, clock: f64, beat: f64, bpm: f64) {
-        self.bpm = js_min(Self::MAX_BPM, js_max(Self::MIN_BPM, bpm));
+        let bpm = js_min(Self::MAX_BPM, js_max(Self::MIN_BPM, bpm));
+        self.bpm = bpm;
         let per_step = 60.0 / bpm / Self::STEPS_PER_BEAT;
-        let at = beat * Self::STEPS_PER_BEAT + Self::HORIZON / per_step;
-        let n = at.ceil() as i64;
-        let n = if self.playing { n.max(self.next) } else { n };
-        self.anchor_step = n;
-        self.anchor_time = clock + (n as f64 - beat * Self::STEPS_PER_BEAT) * per_step;
-        if !self.playing {
+        let pos = beat * Self::STEPS_PER_BEAT;
+        let fresh = (pos + Self::HORIZON / per_step).ceil() as i64;
+        // continuing: the next step is still ahead of the host and no further than one step
+        // past the horizon (tick schedules up to the horizon, so that is where `next` sits)
+        let cont = self.playing && (self.next as f64) >= pos && self.next <= fresh + 1;
+        let n = if cont { self.next } else { fresh };
+        if !cont {
             self.mark_n = [-1; MARKS];
         }
+        self.anchor_step = n;
+        self.anchor_time = clock + (n as f64 - pos) * per_step;
         self.next = n;
         self.playing = true;
     }

@@ -11,7 +11,7 @@ license = "MIT"
 opt-level = 3
 codegen-units = 1
 lto = "fat"
-panic = "abort"
+panic = "unwind" # a panic is caught at the C ABI (chimera-move), never kills the host
 debug = false
 
 [profile.dev]

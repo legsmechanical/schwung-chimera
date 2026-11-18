@@ -43,7 +43,7 @@
         "Keys set pitch and",
         "breathe. Shape the",
         "sound by hand on",
-        "Mouth and Throat.",
+        "Throat and Mouth.",
         "",
         "Vowel jumps the",
         "mouth to a vowel;",
@@ -89,8 +89,14 @@
       ]
     },
     {
-      "title": "Setup",
+      "title": "Settings",
       "lines": [
+        "Engine and Buffer",
+        "are set in Schwung",
+        "Manager (move.local",
+        ":7700, Modules,",
+        "CHIMERA).",
+        "",
         "Engine: Light runs",
         "a lighter airway",
         "(about 20% of a",
