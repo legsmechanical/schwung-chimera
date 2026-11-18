@@ -1,0 +1,62 @@
+{
+ "Ah": {
+  "width": 58.5,
+  "upper_lip_top": 6.75,
+  "lower_lip_bottom": 15.25,
+  "opening_top": null,
+  "opening_bottom": null,
+  "opening_width": 0,
+  "teeth_upper_rows": 0,
+  "teeth_lower_rows": 0
+ },
+ "Ee": {
+  "width": 77.5,
+  "upper_lip_top": 5.0,
+  "lower_lip_bottom": 30.75,
+  "opening_top": 12.25,
+  "opening_bottom": 20.5,
+  "opening_width": 65.75,
+  "teeth_upper_rows": 4.0,
+  "teeth_lower_rows": 2.0
+ },
+ "Eh": {
+  "width": 65.0,
+  "upper_lip_top": 7.75,
+  "lower_lip_bottom": 43.25,
+  "opening_top": 16.25,
+  "opening_bottom": 33.75,
+  "opening_width": 53.0,
+  "teeth_upper_rows": 1.5,
+  "teeth_lower_rows": 1.75
+ },
+ "Oo": {
+  "width": 41.75,
+  "upper_lip_top": 0.0,
+  "lower_lip_bottom": 34.75,
+  "opening_top": 12.5,
+  "opening_bottom": 22.75,
+  "opening_width": 26.5,
+  "teeth_upper_rows": 5.0,
+  "teeth_lower_rows": 0.75
+ },
+ "Oh": {
+  "width": 44.0,
+  "upper_lip_top": 0.0,
+  "lower_lip_bottom": 46.0,
+  "opening_top": 12.75,
+  "opening_bottom": 37.5,
+  "opening_width": 24.0,
+  "teeth_upper_rows": 5.0,
+  "teeth_lower_rows": 5.5
+ },
+ "closed": {
+  "width": 62.0,
+  "upper_lip_top": 7.25,
+  "lower_lip_bottom": 26.5,
+  "opening_top": 15.75,
+  "opening_bottom": 16.0,
+  "opening_width": 46.5,
+  "teeth_upper_rows": 0.0,
+  "teeth_lower_rows": 0.25
+ }
+}

@@ -76,12 +76,16 @@ def main() -> int:
 
         # capture the module's own output while pads play (shim align dump, 6 s)
         subprocess.run(["ssh", "ableton@move.local", f"echo 6 > {SCHW}/align_dump_trigger"], check=True)
-        syl = [get("synth:next_syllable")]
+        # Sing: Position (live) moves on as pads play, and the Lyrics page's view is served
+        put("synth:mode", "1")
+        d.settle(10)
+        pos = [get("synth:position:effective")]
         for note in (68, 70, 72, 73, 75, 77):
             d.pad(note, 350)
             d.settle(8)
-            syl.append(get("synth:next_syllable"))
-        print("next syllable as pads play:", " -> ".join(repr(s) for s in syl))
+            pos.append(get("synth:position:effective"))
+        print("position as pads play:", " -> ".join(repr(s) for s in pos))
+        print("lyrics view  ->", (get("synth:chm_view") or "")[:60])
         time.sleep(4)
         print("status after ->", get("synth:chm_status"))
 

@@ -64,47 +64,6 @@ fn every_mode_sounds_and_stops() {
         c.set(P_HOLD, 0.0);
         run(&mut c, 0.8);
 
-        // Beatbox: a hit per pad class, then the pattern on a running transport
-        c.set(P_MODE, MODE_BEATBOX as f64);
-        let mut hits = Vec::new();
-        for n in [36u8, 38, 40, 41, 42, 45] {
-            c.note_on(n, 100);
-            hits.extend(run(&mut c, 0.3));
-        }
-        assert!(check("beatbox hits", &hits) > 0.003);
-        let mut pat = Vec::new();
-        let mut beat = 0.0;
-        for _ in 0..(2.0 * FS / 128.0) as usize {
-            c.transport(beat, 96.0);
-            let mut b = [0f32; 128];
-            c.render(&mut b);
-            pat.extend_from_slice(&b);
-            beat += 128.0 / FS * 96.0 / 60.0;
-        }
-        assert!(check("beatbox pattern", &pat) > 0.003);
-        c.transport(-1.0, 96.0);
-        run(&mut c, 0.6);
-
-        // the creatures: pitch on the keys, then a call
-        for m in MODE_FIRST_CREATURE..MODE_FIRST_CREATURE + 4 {
-            c.set(P_MODE, m as f64);
-            c.note_on(60, 100);
-            let x = run(&mut c, 0.8);
-            c.note_off(60);
-            run(&mut c, 1.0);
-            let q = run(&mut c, 0.5);
-            assert!(check(&format!("creature {m} keys"), &x) > 0.003);
-            assert!(check(&format!("creature {m} released"), &q) < 0.01);
-            let (keys, _) = CREATURE_KEYS[m - MODE_FIRST_CREATURE];
-            c.set(keys, 1.0);
-            c.note_on(60, 100);
-            let call = run(&mut c, 1.2);
-            c.note_off(60);
-            assert!(check(&format!("creature {m} call"), &call) > 0.003);
-            c.set(keys, 0.0);
-            run(&mut c, 1.0);
-        }
-
         // a body change settles, then sings
         c.set(P_MODE, MODE_SING as f64);
         c.set(P_FEMALE, 1.0);
@@ -116,123 +75,136 @@ fn every_mode_sounds_and_stops() {
     }
 }
 
+fn published(c: &mut Chimera) -> std::collections::HashMap<u32, f64> {
+    let (mut ids, mut vals) = ([0u32; 64], [0f64; 64]);
+    let n = c.take_published(&mut ids, &mut vals);
+    ids[..n].iter().copied().zip(vals[..n].iter().copied()).collect()
+}
+
 #[test]
 fn a_picked_vowel_publishes_the_mouth_and_a_set_one_does_not() {
     let mut c = Chimera::new(FS, true, None);
     c.set(P_MODE, MODE_VOWEL as f64);
-    let (mut ids, mut vals) = ([0u32; 32], [0f64; 32]);
     // a restored state or a preset sets the vowel quietly: the saved mouth knobs stay
     c.set(P_VOWEL, 9.0);
-    assert_eq!(c.take_published(&mut ids, &mut vals), 0);
+    c.set(P_SWEEP, 0.0);
+    assert!(published(&mut c).is_empty());
     c.pick_vowel(9); // Oo: rounded, protruded
-    let n = c.take_published(&mut ids, &mut vals);
-    let got: std::collections::HashMap<u32, f64> = ids[..n].iter().copied().zip(vals[..n].iter().copied()).collect();
+    let got = published(&mut c);
     assert!(got.get(&(P_ROUND as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
     assert!(got.get(&(P_PROTRUDE as u32)).is_some_and(|&v| v > 0.8), "{got:?}");
-    // a pattern: set quietly keeps the swing, picked takes the pattern's own
-    c.set(P_SWING, 0.47);
-    c.set(P_PATTERN, 3.0);
-    assert_eq!(c.take_published(&mut ids, &mut vals), 0);
-    c.pick_pattern(3);
-    let n = c.take_published(&mut ids, &mut vals);
-    assert!(n == 1 && ids[0] == P_SWING as u32, "{:?}", &ids[..n]);
+}
+
+#[test]
+fn the_vowel_knob_runs_the_mouth_along_its_path() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, MODE_VOWEL as f64);
+    // the ends of the path: Oo (rounded, high back tongue) and Ee (spread, high front tongue)
+    c.set(P_SWEEP, 0.0);
+    c.pick_sweep();
+    let oo = published(&mut c);
+    c.set(P_SWEEP, 1.0);
+    c.pick_sweep();
+    let ee = published(&mut c);
+    let k = |m: &std::collections::HashMap<u32, f64>, id: usize| m[&(id as u32)];
+    println!("Oo round {:.2} front {:.2}; Ee round {:.2} front {:.2}", k(&oo, P_ROUND), k(&oo, P_TONGUE_X), k(&ee, P_ROUND), k(&ee, P_TONGUE_X));
+    assert!(k(&oo, P_ROUND) > 0.8 && k(&ee, P_ROUND) < 0.2);
+    assert!(k(&ee, P_TONGUE_X) > k(&oo, P_TONGUE_X) + 0.2);
+    // halfway is Ah: the jaw open wider than at either end
+    c.set(P_SWEEP, 0.5);
+    c.pick_sweep();
+    let ah = published(&mut c);
+    assert!(k(&ah, P_JAW) > k(&oo, P_JAW) + 0.2 && k(&ah, P_JAW) > k(&ee, P_JAW) + 0.2, "{ah:?}");
+}
+
+#[test]
+fn pressure_pushes_the_vowel_without_touching_the_knobs() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, MODE_VOWEL as f64);
+    c.set(P_SWEEP, 0.25);
+    c.pick_sweep();
+    published(&mut c);
+    c.set(P_PRESS_AMT, 1.0);
+    c.note_on(57, 100);
+    run(&mut c, 0.3);
+    let before = c.eng_artic_jaw();
+    c.set_pressure(0.5);
+    assert!((c.sweep_effective() - 0.75).abs() < 1e-9);
+    run(&mut c, 0.5);
+    let after = c.eng_artic_jaw();
+    assert!(published(&mut c).is_empty(), "pressure must not move the knobs");
+    // Oh (0.25) -> Eh (0.75) through Ah: the engine's jaw moved
+    println!("jaw {before:.3} -> {after:.3}");
+    assert!((after - before).abs() > 0.05);
+    // the other way, and clamped at the path's end
+    c.set(P_PRESS_AMT, -1.0);
+    c.set_pressure(1.0);
+    assert_eq!(c.sweep_effective(), 0.0);
+    // out of Vowel mode, pressure does nothing
+    c.set(P_MODE, MODE_SING as f64);
+    c.set_pressure(1.0);
+    assert_eq!(c.sweep_effective(), 0.25);
+}
+
+#[test]
+fn velocity_sets_the_vowel_breath() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, MODE_VOWEL as f64);
+    let level = |c: &mut Chimera, v: u8| {
+        c.note_on(57, v);
+        run(c, 0.4);
+        let x = run(c, 0.4);
+        c.note_off(57);
+        run(c, 0.8);
+        rms(&x)
+    };
+    let (soft, hard) = (level(&mut c, 30), level(&mut c, 127));
+    println!("vowel velocity 30: {soft:.4}, 127: {hard:.4}");
+    assert!(hard > soft * 1.3);
+}
+
+#[test]
+fn position_is_the_next_syllable_and_playing_moves_it() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set_lyrics("one two three four five");
+    c.set(P_MODE, MODE_SING as f64);
+    assert_eq!(c.cursor(), 0);
+    c.set(P_POSITION, 3.0);
+    assert_eq!(c.cursor(), 3);
+    c.note_on(60, 100);
+    c.note_off(60);
+    assert_eq!(c.cursor(), 4);
+    // the same value written again still moves it back: playing moved it meanwhile
+    c.set(P_POSITION, 3.0);
+    assert_eq!(c.cursor(), 3);
+    // held at the last syllable
+    c.set(P_POSITION, 200.0);
+    assert_eq!(c.cursor(), 4);
+    // the Lyrics page's syllables
+    c.set_lyrics("hello there");
+    let v = c.view().to_string();
+    println!("{v:?}");
+    assert!(v.starts_with("S|"));
+    let words: Vec<&str> = v[2..].split(' ').filter(|w| !w.is_empty()).collect();
+    assert_eq!(words.len(), 2);
+    assert_eq!(words[0].split(chimera_move::sing::SYL_SEP).count(), 2, "hel-lo: {v:?}");
 }
 
 #[test]
 fn rewriting_a_value_does_nothing() {
-    // a scene or an LFO writes every block: the close mic must not reset each time
+    // a scene or an LFO writes every block: a held vowel must not restart each time
     let mut c = Chimera::new(FS, true, None);
-    c.set(P_MODE, MODE_BEATBOX as f64);
-    c.note_on(36, 100);
+    c.set(P_MODE, MODE_VOWEL as f64);
+    c.note_on(57, 100);
     let mut x = Vec::new();
-    for _ in 0..(0.4 * FS / 128.0) as usize {
-        c.set(P_MIC, 1.0);
-        c.set(P_PATTERN, 1.0);
+    for _ in 0..(0.6 * FS / 128.0) as usize {
+        c.set(P_MODE, MODE_VOWEL as f64);
+        c.set(P_HOLD, 0.0);
         let mut b = [0f32; 128];
         c.render(&mut b);
         x.extend_from_slice(&b);
     }
-    assert!(check("kick under rewrites", &x) > 0.003);
-}
-
-/// Steps the pattern plays while the host transport runs `beats` at `bpm` (the tempo reported
-/// with `wobble`, as Move's measured tempo does), starting at `from`.
-fn steps_played(c: &mut Chimera, from: f64, beats: f64, bpm: f64, wobble: f64) -> usize {
-    let mut beat = from;
-    let (mut last, mut n) = (c.beat_step(), 0);
-    let blocks = (beats * 60.0 / bpm * FS / 128.0) as usize;
-    for i in 0..blocks {
-        let jitter = if (beat as i64) % 2 == 0 { wobble } else { -wobble };
-        c.transport(beat, bpm + jitter * (i % 3) as f64);
-        let mut b = [0f32; 128];
-        c.render(&mut b);
-        beat += 128.0 / FS * bpm / 60.0;
-        let s = c.beat_step();
-        if s != last && s >= 0 {
-            n += 1;
-        }
-        last = s;
-    }
-    n
-}
-
-#[test]
-fn the_pattern_stays_locked_to_the_transport() {
-    let mut c = Chimera::new(FS, true, None);
-    c.set(P_MODE, MODE_BEATBOX as f64);
-    c.pick_pattern(1);
-    // warm up, then 8 beats with the tempo wobbling in its last digits: 32 steps, none skipped
-    steps_played(&mut c, 0.0, 1.0, 100.0, 0.03);
-    let n = steps_played(&mut c, 1.0, 8.0, 100.0, 0.03);
-    println!("8 beats at a wobbling 100 bpm: {n} steps");
-    assert!((31..=33).contains(&n), "{n} steps");
-    // the transport jumps back (a loop, a restart): the pattern carries on at once
-    let n = steps_played(&mut c, 0.0, 2.0, 100.0, 0.0);
-    println!("2 beats after a jump back: {n} steps");
-    assert!(n >= 6, "{n} steps after the jump");
-    // 300 bpm is followed at half time: 4 host beats = 2 pattern beats = 8 steps
-    c.transport(-1.0, 300.0);
-    run(&mut c, 0.3);
-    steps_played(&mut c, 0.0, 2.0, 300.0, 0.0);
-    let n = steps_played(&mut c, 2.0, 8.0, 300.0, 0.0);
-    println!("8 beats at 300 bpm: {n} steps");
-    assert!((15..=17).contains(&n), "{n} steps");
-}
-
-#[test]
-fn switching_keys_to_a_call_stops_the_breath() {
-    let mut c = Chimera::new(FS, true, None);
-    c.set(P_MODE, MODE_SONGBIRD as f64);
-    c.note_on(60, 100);
-    assert!(check("songbird held", &run(&mut c, 0.5)) > 0.003);
-    // still holding the key: Keys -> a call, so the held key no longer breathes
-    c.set(CREATURE_KEYS[0].0, 1.0);
-    run(&mut c, 3.0);
-    assert!(check("songbird after keys -> call", &run(&mut c, 0.5)) < 0.01);
-}
-
-#[test]
-fn the_close_mic_brings_beatbox_up_to_the_voice() {
-    let mut c = Chimera::new(FS, true, None);
-    let level = |c: &mut Chimera| {
-        c.set(P_MODE, MODE_BEATBOX as f64);
-        let mut x = Vec::new();
-        for n in [36u8, 38, 40, 36, 38, 40] {
-            c.note_on(n, 100);
-            x.extend(run(c, 0.25));
-        }
-        x
-    };
-    c.set(P_MIC, 0.0);
-    let dry = level(&mut c);
-    c.set(P_MODE, MODE_SING as f64);
-    c.set(P_MIC, 1.0);
-    let wet = level(&mut c);
-    let (d, w) = (check("beatbox dry", &dry), check("beatbox close mic", &wet));
-    let peak = wet.iter().fold(0f32, |m, s| m.max(s.abs()));
-    println!("close mic peak {peak:.3}");
-    assert!(w > 4.0 * d, "close mic {w} vs dry {d}");
-    assert!(peak <= 0.892, "limiter: peak {peak}");
+    assert!(check("vowel under rewrites", &x[x.len() / 2..]) > 0.01);
 }
 
 /// median voiced pitch (Hz) over 2048-sample frames
@@ -381,6 +353,29 @@ fn a_line_being_spoken_is_not_mixed_with_a_new_plan() {
 /// `CHIMERA_DEMO=1 ./scripts/test.sh` writes build/speak-demo.wav: a few lines through the whole
 /// performer (light engine, the Move's output chain).
 #[test]
+fn the_line_page_knows_when_each_word_ends() {
+    let mut c = speaker("Hello there, I am a voice made of air.");
+    let v = c.view().to_string();
+    println!("{v}");
+    let f: Vec<&str> = v.splitn(3, '|').collect();
+    assert_eq!(f[0], "P");
+    assert_eq!(f[2], "Hello there, I am a voice made of air.");
+    let ends: Vec<i64> = f[1].split(',').map(|x| x.parse().unwrap()).collect();
+    assert_eq!(ends.len(), 9);
+    assert!(ends.windows(2).all(|w| w[1] >= w[0]) && ends[0] > 50, "{ends:?}");
+    // the comma's pause comes after "there"
+    let gaps: Vec<i64> = ends.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps[1] > gaps[2], "{gaps:?}");
+    assert!(c.speak_elapsed().is_none());
+    let s0 = c.view_serial();
+    c.note_on(60, 100);
+    run(&mut c, 0.3);
+    let e = c.speak_elapsed().expect("speaking");
+    assert!((0.2..0.4).contains(&e), "{e}");
+    assert_ne!(c.view_serial(), s0);
+}
+
+#[test]
 fn speak_demo() {
     if std::env::var("CHIMERA_DEMO").is_err() {
         return;
@@ -426,4 +421,21 @@ fn speak_demo() {
     }
     std::fs::write(path, w).unwrap();
     println!("wrote {path}: {:.1} s", out.len() as f64 / FS);
+}
+
+/// The Vowel knob's path as mouth-knob values (male body), for the Vowel page's picture
+/// (src/params.json "sweep_knobs"): `./scripts/test.sh` prints it.
+#[test]
+fn print_the_path_for_the_picture() {
+    let mut c = Chimera::new(FS, true, None);
+    c.set(P_MODE, MODE_VOWEL as f64);
+    let keys = [("tongue_x", P_TONGUE_X), ("tongue_y", P_TONGUE_Y), ("jaw", P_JAW), ("lips", P_LIPS), ("round", P_ROUND), ("protrude", P_PROTRUDE)];
+    let mut rows = Vec::new();
+    for (i, _) in SWEEP_PATH.iter().enumerate() {
+        c.set(P_SWEEP, i as f64 / (SWEEP_PATH.len() - 1) as f64);
+        c.pick_sweep();
+        let got = published(&mut c);
+        rows.push(format!("[{}]", keys.iter().map(|(_, id)| format!("{:.3}", got.get(&(*id as u32)).copied().unwrap_or(-1.0))).collect::<Vec<_>>().join(", ")));
+    }
+    println!("sweep_knobs ({}): [{}]", keys.iter().map(|k| k.0).collect::<Vec<_>>().join(", "), rows.join(", "));
 }

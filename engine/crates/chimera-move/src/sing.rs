@@ -15,6 +15,9 @@ use chimera::phonetics::planner::EXHALE_LABEL;
 use chimera::phonetics::sing::{LegatoFrom, MelismaOptions, NoteOnOptions, plan_melisma, plan_note_off, plan_note_on};
 use chimera::phonetics::syllables::lyrics_to_syllables;
 
+/// Between two syllables of one word in the Lyrics page's view (never printed).
+pub const SYL_SEP: char = '\u{b7}';
+
 /// Gestures are scheduled this far ahead of the voice clock (the app's live lead).
 const LEAD: f64 = 0.006;
 
@@ -39,11 +42,13 @@ pub struct Singer {
     /// endings whose breath-out has not been dropped by a following note
     exhales_live: bool,
     scratch: Vec<Gesture>,
+    /// bumped when the syllables change (the Lyrics page re-reads them)
+    serial: u64,
 }
 
 impl Default for Singer {
     fn default() -> Self {
-        Singer { syllables: Vec::new(), cursor: 0, sounding: None, keys: Vec::with_capacity(16), next_tag: 2.0, tails: Vec::with_capacity(9), exhales_live: false, scratch: Vec::new() }
+        Singer { syllables: Vec::new(), cursor: 0, sounding: None, keys: Vec::with_capacity(16), next_tag: 2.0, tails: Vec::with_capacity(9), exhales_live: false, scratch: Vec::new(), serial: 1 }
     }
 }
 
@@ -62,10 +67,33 @@ impl Singer {
     pub fn set_lyrics(&mut self, text: &str, g2p: &EnglishG2P) {
         self.syllables = lyrics_to_syllables(text, g2p);
         self.cursor = 0;
+        self.serial += 1;
     }
 
-    pub fn restart(&mut self) {
-        self.cursor = 0;
+    /// The syllable the next key sings.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Move to syllable `i` (held at the last one).
+    pub fn set_cursor(&mut self, i: usize) {
+        self.cursor = i.min(self.syllables.len().saturating_sub(1));
+    }
+
+    /// Changes whenever the syllables do.
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// The syllables for the Lyrics page: each one's text, then ' ' after a word's last syllable
+    /// or SYL_SEP inside a word; and the serial that changes with them.
+    pub fn view(&self, out: &mut String) -> u64 {
+        out.clear();
+        for s in &self.syllables {
+            out.push_str(&s.text);
+            out.push(if s.word_end { ' ' } else { SYL_SEP });
+        }
+        self.serial
     }
 
     pub fn next_text(&self) -> &str {

@@ -1,5 +1,5 @@
 {
-  "title": "CHIMERA",
+  "title": "CHIMERA Voice",
   "children": [
     {
       "title": "Overview",
@@ -13,28 +13,8 @@
         "No samples.",
         "",
         "One voice at a",
-        "time. Pick a mode",
-        "on the Play page."
-      ]
-    },
-    {
-      "title": "Sing",
-      "lines": [
-        "Each key sings the",
-        "next syllable of",
-        "the lyrics at its",
-        "pitch.",
-        "",
-        "Hold a key while",
-        "playing the next:",
-        "legato. Velocity:",
-        "breath.",
-        "",
-        "Words: built-in",
-        "lyrics. Lyrics:",
-        "click to type your",
-        "own. Again: back",
-        "to the first word."
+        "time. Mode: Speak,",
+        "Sing or Vowel."
       ]
     },
     {
@@ -55,58 +35,53 @@
         "",
         "Rate: how fast.",
         "Expr: how much the",
-        "pitch moves."
+        "pitch moves.",
+        "",
+        "Words: built-in",
+        "lyrics. Lyrics:",
+        "click to type your",
+        "own."
+      ]
+    },
+    {
+      "title": "Sing",
+      "lines": [
+        "Each key sings the",
+        "next syllable of",
+        "the lyrics at its",
+        "pitch.",
+        "",
+        "Hold a key while",
+        "playing the next:",
+        "legato. Velocity:",
+        "breath.",
+        "",
+        "Pos: the syllable",
+        "the next key sings.",
+        "Turn it to start",
+        "anywhere."
       ]
     },
     {
       "title": "Vowel",
       "lines": [
         "Keys set pitch and",
-        "breathe. Shape the",
-        "sound by hand on",
-        "Throat and Mouth.",
+        "breathe; velocity:",
+        "how hard.",
         "",
-        "Vowel jumps the",
-        "mouth to a vowel;",
-        "the knobs follow.",
+        "Vowel sweeps the",
+        "mouth Oo Oh Ah Eh",
+        "Ee. Pad pressure",
+        "pushes it on, as",
+        "far as Push says",
+        "(below 0: back).",
+        "",
         "Hold: drone with",
-        "no key down."
-      ]
-    },
-    {
-      "title": "Beatbox",
-      "lines": [
-        "Pads by note name:",
-        "C  kick",
-        "C# lip pop",
-        "D  snare",
-        "D# rimshot",
-        "E  hi-hat",
-        "F  open hat",
-        "F# tongue click",
-        "G  inward snare",
-        "G# crash",
-        "A-B hum (bass)",
-        "",
-        "Beat plays while",
-        "Move's transport",
-        "runs, in time."
-      ]
-    },
-    {
-      "title": "Creatures",
-      "lines": [
-        "Songbird, Seal,",
-        "Gator, Elephant.",
-        "",
-        "Keys: Pitch plays",
-        "the creature at the",
-        "key's pitch while",
-        "held. The others",
-        "play that call at",
-        "the key's pitch.",
-        "Hold: keep it",
-        "breathing."
+        "no key down.",
+        "Mouth, Throat:",
+        "shape it by hand.",
+        "Pick: jump to one",
+        "of 13 vowels."
       ]
     },
     {

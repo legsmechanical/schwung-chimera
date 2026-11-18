@@ -53,7 +53,7 @@ LIB="build/cargo/aarch64-unknown-linux-gnu/release/libchimera_move.a"
 "${CROSS_PREFIX}strip" --strip-unneeded build/arm/dsp.so
 
 echo "Packaging..."
-cp src/module.json src/ui.js src/help.json src/settings-schema.json "dist/$ID/"
+cp src/module.json src/ui.js src/canvas.js src/help.json src/settings-schema.json "dist/$ID/"
 cp build/arm/dsp.so "dist/$ID/dsp.so"
 cp engine/public/data/cmudict.txt.gz "dist/$ID/cmudict.txt.gz"
 cp LICENSE "dist/$ID/LICENSE"

@@ -6,12 +6,14 @@
 |---|---|
 | `src/params.json` | THE table: every param, page, preset and lyric set. Everything below is generated from it. |
 | `src/settings-schema.json` | Engine and Buffer, as per-module settings (Schwung Manager writes `config.json` beside the module; the render thread reads it) |
-| `tools/gen.mjs` | → `src/module.json`, `src/dsp/params_gen.h`, `engine/crates/chimera-move/src/params_gen.rs`, `build/contract.json` |
+| `tools/gen.mjs` | → `src/module.json`, `src/dsp/params_gen.h`, `engine/crates/chimera-move/src/params_gen.rs`, `src/canvas.js`, `build/contract.json` |
+| `build/render_voice.py` | Every page of every mode through the host's own page renderer → `build/voicepng/sheet.png` |
 | `src/dsp/chimera_plugin.c` | Plugin API v2: the param mirror, presets/state, and the render thread with its rings |
-| `engine/crates/chimera-move/` | The performer (keys → sung syllables, vowels, beatbox, creatures), the close-mic chain, a C ABI |
+| `engine/crates/chimera-move/` | The performer (keys → spoken lines, sung syllables, vowels; the Vowel path and pressure), the output limiter, a C ABI |
+| `src/canvas.src.js`, `src/mouth_keys.json` | The drawn pages (Line, Lyrics, the mouth); `gen.mjs` builds `src/canvas.js` from them. The mouth's keyframes were measured off a 3D head used only as a reference (`design/vowel-34/`); no model data ships |
 | `engine/crates/chimera/` | The CHIMERA engine, vendored from upstream at `engine/UPSTREAM_COMMIT`, with the Move port's changes (`engine/move-port.patch` is the light path's first two commits) |
 | `tools/cells.mjs` | Plans every mode's pages with the Move's own `param_pages` code and prints each cell's label and widget |
-| `tests/probe.c` | Loads `dsp.so` on the Move outside the host, plays every mode at real-time pace (Speak re-planned while it speaks), checks state restores and the v1 migration, reports underruns |
+| `tests/probe.c` | Loads `dsp.so` on the Move outside the host, plays every mode at real-time pace (Speak re-planned while it speaks), checks the live values (Position, the Vowel knob under pressure, the Line page's clock), velocity, state restores and the v1/v2 migrations, reports underruns |
 | `tests/device_check.py` | Loads the module into slot 0 of the live host through `schwung-testd` (refuses if slot 0 is in use or an overtake tool owns the pads) |
 
 `./scripts/test.sh` runs the performer's tests natively; `--engine` adds the whole engine suite,
@@ -29,14 +31,22 @@ thread.
 - **Param values are latest-wins**, not queued: a value per id plus a dirty bitmap. A scene or LFO
   writing every block costs nothing, and nothing can be dropped. Writing an unchanged value does
   nothing on either side.
-- **The cmd ring** carries only notes, all-notes-off, Again and *picks*, with 64 slots kept for
+- **The cmd ring** carries only notes, all-notes-off and *picks*, with 64 slots kept for
   note-offs (a note-on that does not fit is dropped whole; a note-off that does not fit silences
   everything).
-- **Picks**: choosing a vowel moves the mouth knobs, choosing a pattern takes its swing. Only a
-  write that changes Vowel or Pattern is a pick; a restored state or a preset sets them quietly
-  (a preset then picks its vowel, so its posture wins over the table's default mouth). Every write
+- **Picks**: choosing a vowel, or turning the Vowel knob, moves the mouth knobs. Only a write
+  that changes Pick Vowel or Vowel is a pick; a restored state or a preset sets them quietly (a
+  preset then picks its vowel, so its posture wins over the table's default mouth). Every write
   has a generation number, and a pick's results never replace a value written after it, on either
-  side: that is what keeps a saved state's mouth and swing when the set reloads.
+  side: that is what keeps a saved state's mouth when the set reloads.
+- **Pad pressure** (poly or channel aftertouch; the hardest-pressed pad held) is latest-wins
+  into the render thread. It never moves a knob: the engine's mouth is the knobs plus how far the
+  path moves between the Vowel knob and where pressure pushed it.
+- **Live values** (`"live": true`; the host reads `<key>:effective` every tick): `position` is
+  Sing's cursor and `sweep:effective` the Vowel knob after pressure, both answered from the
+  callback's own mirror (a silent slot's render is skipped). `chm_view` carries what Line and
+  Lyrics draw; for Speak it says how far into the line the audio already played is, and the page
+  counts on from there with its own clock between reads.
 - **A panic** in the engine is caught at the C ABI (`panic = "unwind"`); the engine then renders
   silence and `get_error` / `load_error` say so. It never takes the host down.
 

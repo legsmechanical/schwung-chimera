@@ -1,5 +1,5 @@
 /*
- * CHIMERA for Schwung / Ableton Move: plugin API v2 around the Rust engine (chimera-move).
+ * CHIMERA Voice for Schwung / Ableton Move: plugin API v2 around the Rust engine (chimera-move).
  *
  * THREADING. Every live plugin entry point runs on the SPI audio callback (MODULES.md "there is
  * no control thread"); create/destroy and the saved-state restore run on the host's SCHED_OTHER
@@ -16,13 +16,15 @@
  *                                      twice before the worker looks is applied once, and a
  *                                      full queue can never drop one
  *   callback -> worker   lyrics        one buffer under a seqlock + a dirty flag (latest wins)
- *   callback -> worker   cmd ring      notes, all-notes-off, Again, and "picks" (the player
- *                                      chose a vowel / a pattern: the engine moves the mouth /
- *                                      takes the pattern's swing), with room kept for note-offs
+ *   callback -> worker   cmd ring      notes, all-notes-off, and "picks" (the player chose a
+ *                                      vowel or turned the Vowel knob: the engine moves the
+ *                                      mouth), with room kept for note-offs
+ *   callback -> worker   pressure      pad pressure (latest wins)
  *   worker -> callback   audio ring    mono float, `buffer` blocks ahead
- *   worker -> callback   pub ring      what a pick set (the mouth knobs, the swing), tagged
- *                                      with the pick's write generation
- *   callback -> worker   transport     seqlock: beat position, tempo, at which read position
+ *   worker -> callback   pub ring      what a pick set (the mouth knobs), tagged with the
+ *                                      pick's write generation
+ *   worker -> callback   view          what the drawn pages show (seqlock), Sing's cursor and
+ *                                      where Speak's line started (atomics)
  *
  * WRITE GENERATIONS. Every value the callback stores gets the next generation number. A pick
  * carries the generation it was made at; its results never overwrite a value written after it
@@ -56,7 +58,7 @@
 #include "params_gen.h"
 
 #define EXPORT __attribute__((visibility("default")))
-#define BUILD_ID "chimera 0.3.0"
+#define BUILD_ID "chimera 0.4.0"
 
 /* ---- the Rust side (engine/crates/chimera-move) */
 typedef struct Handle Handle;
@@ -66,15 +68,18 @@ extern int chm_failed(Handle *h);
 extern void chm_render(Handle *h, float *out, size_t n);
 extern void chm_set(Handle *h, uint32_t id, double v);
 extern void chm_pick_vowel(Handle *h, uint32_t i);
-extern void chm_pick_pattern(Handle *h, uint32_t i);
+extern void chm_pick_sweep(Handle *h);
+extern void chm_set_pressure(Handle *h, double p);
 extern void chm_set_light(Handle *h, int light);
 extern void chm_set_lyrics(Handle *h, const char *text);
 extern void chm_note_on(Handle *h, uint8_t note, uint8_t velocity);
 extern void chm_note_off(Handle *h, uint8_t note);
 extern void chm_all_notes_off(Handle *h);
-extern void chm_transport(Handle *h, double beat, double bpm);
 extern size_t chm_take_published(Handle *h, uint32_t *ids, double *vals, size_t max);
-extern size_t chm_next_syllable(Handle *h, uint8_t *buf, size_t cap);
+extern uint32_t chm_cursor(Handle *h);
+extern double chm_speak_elapsed(Handle *h);
+extern uint64_t chm_view_serial(Handle *h);
+extern size_t chm_view(Handle *h, uint8_t *buf, size_t cap);
 
 static const host_api_v1_t *g_host;
 
@@ -84,12 +89,12 @@ static const host_api_v1_t *g_host;
 #define CMD_RESERVE 64 /* kept free for note-offs and all-notes-off */
 #define PUB_CAP 256    /* power of two */
 #define LYR_MAX 512
-#define SYL_MAX 64
+#define VIEW_MAX 4096
 #define DIRTY_WORDS ((CP_COUNT + 63) / 64)
 static const int kBufferBlocks[3] = {2, 4, 8}; /* Low / Normal / Safe: 5.8, 11.6, 23.2 ms */
 #define BUFFER_DEFAULT 1
 
-enum { CMD_NOTE_ON, CMD_NOTE_OFF, CMD_ALL_OFF, CMD_RESTART, CMD_PICK_VOWEL, CMD_PICK_PATTERN };
+enum { CMD_NOTE_ON, CMD_NOTE_OFF, CMD_ALL_OFF, CMD_PICK_VOWEL, CMD_PICK_SWEEP };
 typedef struct {
     uint8_t type, a, b;
     uint32_t gen;
@@ -108,7 +113,9 @@ typedef struct {
     int octave;
     int8_t note_map[128]; /* key pressed -> note sent (octave at press time) */
     uint32_t gen;         /* write generation, callback (or loader, before the swap) only */
-    char syl_cache[SYL_MAX];
+    char view_cache[VIEW_MAX];
+    uint8_t press[128];   /* poly pressure per pad held */
+    uint8_t chan_press;
 
     /* ---- param values: latest per id */
     _Atomic uint64_t wval[CP_COUNT]; /* double bits */
@@ -129,14 +136,14 @@ typedef struct {
     pub_t pub[PUB_CAP];
     _Atomic uint32_t pub_w, pub_r;
 
-    /* ---- transport seqlock */
-    _Atomic uint32_t tr_seq;
-    _Atomic double tr_beat, tr_bpm;
-    _Atomic uint64_t tr_read; /* audio read position when the beat was sampled */
+    /* ---- pad pressure, 0..1 (float bits; latest wins) */
+    _Atomic uint32_t pressure;
 
-    /* ---- next syllable seqlock (worker writes on change) */
-    _Atomic uint32_t syl_seq;
-    char syl[SYL_MAX];
+    /* ---- the drawn pages' view: seqlock, worker writes on change */
+    _Atomic uint32_t view_seq;
+    char view[VIEW_MAX];
+    _Atomic uint32_t cursor;      /* Sing: the syllable the next key sings */
+    _Atomic int64_t speak_start;  /* Speak: audio position the line started at, -1: silent */
 
     /* ---- shared flags */
     _Atomic int ready; /* the engine exists and has the state */
@@ -255,24 +262,6 @@ static void pick(inst_t *in, int type, int v) {
 }
 
 /* ------------------------------------------------------------------ worker */
-
-/* the host's beat at the first sample of the block about to be rendered (< 0: stopped). The
- * worker may retry: the callback (higher priority) never waits on it. */
-static void transport_at(inst_t *in, uint64_t write_pos, double *beat, double *bpm) {
-    double b, t;
-    uint64_t rd;
-    uint32_t s0, s1;
-    do {
-        s0 = atomic_load_explicit(&in->tr_seq, memory_order_acquire);
-        b = atomic_load_explicit(&in->tr_beat, memory_order_relaxed);
-        t = atomic_load_explicit(&in->tr_bpm, memory_order_relaxed);
-        rd = atomic_load_explicit(&in->tr_read, memory_order_relaxed);
-        atomic_thread_fence(memory_order_acquire);
-        s1 = atomic_load_explicit(&in->tr_seq, memory_order_relaxed);
-    } while ((s0 & 1) || s0 != s1);
-    *bpm = t;
-    *beat = b < 0 ? -1.0 : b + (double)(int64_t)(write_pos - rd) / in->sr * t / 60.0;
-}
 
 static void read_lyrics(inst_t *in, char *out) {
     uint32_t s0, s1;
@@ -394,7 +383,9 @@ static void *worker(void *arg) {
     apply_dirty(in, h, lyr);
 
     float buf[BLOCK];
-    char syl[SYL_MAX] = {0}, last_syl[SYL_MAX] = {0};
+    char *view = calloc(1, VIEW_MAX);
+    uint64_t last_view = 0;
+    uint32_t last_press = 0;
     struct timespec last_cfg;
     clock_gettime(CLOCK_MONOTONIC, &last_cfg);
     int failed = 0;
@@ -423,22 +414,25 @@ static void *worker(void *arg) {
                 case CMD_NOTE_ON: chm_note_on(h, c.a, c.b); break;
                 case CMD_NOTE_OFF: chm_note_off(h, c.a); break;
                 case CMD_ALL_OFF: chm_all_notes_off(h); break;
-                case CMD_RESTART: chm_set(h, CP_RESTART, 1.0); break;
                 case CMD_PICK_VOWEL:
                     chm_pick_vowel(h, c.a);
                     publish(in, h, c.gen);
                     break;
-                case CMD_PICK_PATTERN:
-                    chm_pick_pattern(h, c.a);
+                case CMD_PICK_SWEEP:
+                    chm_pick_sweep(h);
                     publish(in, h, c.gen);
                     break;
                 }
             }
+            uint32_t pb = atomic_load_explicit(&in->pressure, memory_order_relaxed);
+            if (pb != last_press) {
+                last_press = pb;
+                float pf;
+                memcpy(&pf, &pb, sizeof pf);
+                chm_set_pressure(h, pf);
+            }
             uint64_t r = atomic_load_explicit(&in->aud_r, memory_order_acquire);
             if ((int64_t)(w - r) >= kBufferBlocks[cfg.buffer] * BLOCK) break;
-            double beat, bpm;
-            transport_at(in, w, &beat, &bpm);
-            chm_transport(h, beat, bpm);
             chm_render(h, buf, BLOCK);
             for (int i = 0; i < BLOCK; ++i) in->audio[(w + (uint64_t)i) & (AUDIO_CAP - 1)] = buf[i];
             w += BLOCK;
@@ -451,16 +445,20 @@ static void *worker(void *arg) {
             failed = 1;
             set_error(in, "CHIMERA: the engine stopped (internal error). Reload the module.");
         }
-        /* the next syllable, for get_param: written only when it changes */
-        chm_next_syllable(h, (uint8_t *)syl, sizeof syl);
-        if (strcmp(syl, last_syl)) {
-            memcpy(last_syl, syl, SYL_MAX);
-            uint32_t s = atomic_load_explicit(&in->syl_seq, memory_order_relaxed);
-            atomic_store_explicit(&in->syl_seq, s + 1, memory_order_relaxed);
+        /* what the drawn pages show: the view only when it changes, the rest every pass */
+        uint64_t vs = chm_view_serial(h);
+        if (view && vs != last_view) {
+            last_view = vs;
+            chm_view(h, (uint8_t *)view, VIEW_MAX);
+            uint32_t s = atomic_load_explicit(&in->view_seq, memory_order_relaxed);
+            atomic_store_explicit(&in->view_seq, s + 1, memory_order_relaxed);
             atomic_thread_fence(memory_order_release);
-            memcpy(in->syl, syl, SYL_MAX);
-            atomic_store_explicit(&in->syl_seq, s + 2, memory_order_release);
+            memcpy(in->view, view, VIEW_MAX);
+            atomic_store_explicit(&in->view_seq, s + 2, memory_order_release);
         }
+        atomic_store_explicit(&in->cursor, chm_cursor(h), memory_order_relaxed);
+        double el = chm_speak_elapsed(h);
+        atomic_store_explicit(&in->speak_start, el < 0 ? -1 : (int64_t)w - (int64_t)llround(el * in->sr), memory_order_relaxed);
 
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -470,6 +468,7 @@ static void *worker(void *arg) {
     }
     chm_destroy(h);
     free(lyr);
+    free(view);
     return NULL;
 }
 
@@ -505,9 +504,12 @@ static int parse_value(int id, const char *val, float *out) {
 
 /* a param written by the grid, a scene, an LFO or automation: an unchanged value does nothing */
 static void set_value(inst_t *in, int id, float v) {
-    const cp_param_t *p = &cp_params[id];
-    if (p->trigger) {
-        if (v >= 0.5f) cmd_push(in, (cmd_t){CMD_RESTART, 0, 0, in->gen}, CMD_RESERVE);
+    if (cp_params[id].trigger) return;
+    /* Position moves as keys sing: unchanged means the cursor already being there */
+    if (id == CP_POSITION) {
+        if ((uint32_t)v == atomic_load_explicit(&in->cursor, memory_order_relaxed) && v == in->val[id]) return;
+        atomic_store_explicit(&in->cursor, (uint32_t)v, memory_order_relaxed);
+        store(in, id, v);
         return;
     }
     if (v == in->val[id]) return;
@@ -517,10 +519,12 @@ static void set_value(inst_t *in, int id, float v) {
         if (t) set_lyrics_text(in, t);
     } else if (id == CP_VOWEL) {
         pick(in, CMD_PICK_VOWEL, (int)v);
-    } else if (id == CP_PATTERN) {
-        pick(in, CMD_PICK_PATTERN, (int)v);
+    } else if (id == CP_SWEEP) {
+        pick(in, CMD_PICK_SWEEP, 0);
     }
 }
+
+static void update_pressure(inst_t *in);
 
 static void apply_preset(inst_t *in, int idx) {
     if (idx < 0 || idx >= CP_PRESET_COUNT) return;
@@ -528,6 +532,7 @@ static void apply_preset(inst_t *in, int idx) {
     in->preset = idx;
     push_off(in, (cmd_t){CMD_ALL_OFF, 0, 0, 0});
     memset(in->note_map, -1, sizeof in->note_map);
+    update_pressure(in);
     for (int id = 0; id < CP_COUNT; ++id) {
         if (cp_params[id].type == CP_STRING || cp_params[id].trigger) continue;
         if (pr->vals[id] != in->val[id]) store(in, id, pr->vals[id]);
@@ -537,7 +542,7 @@ static void apply_preset(inst_t *in, int idx) {
     pick(in, CMD_PICK_VOWEL, (int)pr->vals[CP_VOWEL]);
 }
 
-/* ---- state: {"v":2,"preset":N,"lyrics":"...","p":{"key":value,...}} */
+/* ---- state: {"v":3,"preset":N,"lyrics":"...","p":{"key":value,...}} */
 
 static int put(char *buf, int len, int n, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static int put(char *buf, int len, int n, const char *fmt, ...) {
@@ -563,7 +568,7 @@ static int put_json_str(char *buf, int len, int n, const char *s) {
 }
 
 static int build_state(inst_t *in, char *buf, int len) {
-    int n = put(buf, len, 0, "{\"v\":2,\"preset\":%d,\"lyrics\":", in->preset);
+    int n = put(buf, len, 0, "{\"v\":3,\"preset\":%d,\"lyrics\":", in->preset);
     n = put_json_str(buf, len, n, in->lyrics);
     n = put(buf, len, n, ",\"p\":{");
     int first = 1;
@@ -615,9 +620,12 @@ static void json_unescape(const char *p, char *out, int cap) {
 }
 
 static void restore_state(inst_t *in, const char *json) {
-    /* v1 (before 0.3.0) had no Speak: its modes from Vowel on are one lower */
+    /* the mode's index by version. v1 (before 0.3.0): Sing, Vowel, Beatbox, the creatures;
+     * v2: Sing, Speak, Vowel, Beatbox, the creatures; v3 (CHIMERA Voice): Speak, Sing, Vowel.
+     * Beatbox and the creatures are not in this module: those states come back singing. */
+    static const int from_v1[] = {CP_MODE_SING, CP_MODE_VOWEL}, from_v2[] = {CP_MODE_SING, CP_MODE_SPEAK, CP_MODE_VOWEL};
     const char *ver = json_find(json, "v");
-    const int v1 = !ver || strtol(ver, NULL, 10) < 2;
+    const long version = ver ? strtol(ver, NULL, 10) : 1;
     const char *p = json_find(json, "preset");
     if (p) {
         long i = strtol(p, NULL, 10);
@@ -632,6 +640,7 @@ static void restore_state(inst_t *in, const char *json) {
     if (!obj) return;
     push_off(in, (cmd_t){CMD_ALL_OFF, 0, 0, 0});
     memset(in->note_map, -1, sizeof in->note_map);
+    update_pressure(in);
     /* the saved values exactly: no vowel posture, no pattern swing, no Words text (the saved
      * lyrics are the truth). Every value is stored, even one the mirror already shows: its new
      * generation is what outranks a pick still in flight (create_instance's first preset) */
@@ -642,7 +651,10 @@ static void restore_state(inst_t *in, const char *json) {
         char *end;
         float f = strtof(v, &end);
         if (end == v || !isfinite(f)) continue;
-        if (id == CP_MODE && v1 && f >= CP_MODE_SPEAK) f += 1;
+        if (id == CP_MODE && version < 3) {
+            int m = (int)f;
+            f = version < 2 ? (m >= 0 && m < 2 ? from_v1[m] : CP_MODE_SING) : (m >= 0 && m < 3 ? from_v2[m] : CP_MODE_SING);
+        }
         store(in, id, fit(id, f));
     }
 }
@@ -662,8 +674,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     }
     snprintf(in->lyrics, LYR_MAX, "%s", CP_LYRICS_DEFAULT);
     memset(in->note_map, -1, sizeof in->note_map);
-    atomic_init(&in->tr_beat, -1.0);
-    atomic_init(&in->tr_bpm, 120.0);
+    atomic_init(&in->speak_start, -1);
     atomic_init(&in->light, 1);
     atomic_init(&in->buffer, BUFFER_DEFAULT);
     if (module_dir && *module_dir) {
@@ -695,6 +706,30 @@ static void destroy_instance(void *instance) {
     free(in);
 }
 
+/* the pressure the Vowel knob follows: the hardest-pressed pad held, or the keyboard's own;
+ * none once no key is down */
+static void update_pressure(inst_t *in) {
+    int held = 0, m = 0;
+    for (int i = 0; i < 128; ++i)
+        if (in->note_map[i] >= 0) {
+            held = 1;
+            if (in->press[i] > m) m = in->press[i];
+        }
+    if (!held) in->chan_press = 0;
+    if (in->chan_press > m) m = in->chan_press;
+    float f = (float)m / 127.0f;
+    uint32_t b;
+    memcpy(&b, &f, sizeof b);
+    atomic_store_explicit(&in->pressure, b, memory_order_relaxed);
+}
+
+static float pressure_now(inst_t *in) {
+    uint32_t b = atomic_load_explicit(&in->pressure, memory_order_relaxed);
+    float f;
+    memcpy(&f, &b, sizeof f);
+    return f;
+}
+
 static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     (void)source;
     inst_t *in = instance;
@@ -706,6 +741,7 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     case 0x90:
         if (d2 > 0) {
             if (!ready) return; /* still building: a note now would sound late, out of place */
+            in->press[d1] = 0;
             int key = d1 + in->octave * 12;
             key = key < 0 ? 0 : key > 127 ? 127 : key;
             if (in->note_map[d1] >= 0 && in->note_map[d1] != key) {
@@ -723,11 +759,22 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
             push_off(in, (cmd_t){CMD_NOTE_OFF, (uint8_t)in->note_map[d1], 0, 0});
             in->note_map[d1] = -1;
         }
+        in->press[d1] = 0;
+        update_pressure(in);
+        break;
+    case 0xA0: /* a pad's pressure */
+        if (in->note_map[d1] >= 0) in->press[d1] = (uint8_t)d2;
+        update_pressure(in);
+        break;
+    case 0xD0: /* the whole keyboard's */
+        in->chan_press = (uint8_t)d1;
+        update_pressure(in);
         break;
     case 0xB0:
         if (d1 == 123 || d1 == 120) {
             memset(in->note_map, -1, sizeof in->note_map);
             push_off(in, (cmd_t){CMD_ALL_OFF, 0, 0, 0});
+            update_pressure(in);
         }
         break;
     default: break;
@@ -743,6 +790,7 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (!strcmp(key, "all_notes_off")) {
         memset(in->note_map, -1, sizeof in->note_map);
         push_off(in, (cmd_t){CMD_ALL_OFF, 0, 0, 0});
+        update_pressure(in);
         return;
     }
     if (!strcmp(key, "octave_transpose")) {
@@ -774,14 +822,33 @@ static int outf(char *buf, int len, const char *fmt, ...) {
     return (k < 0 || k >= len) ? -1 : k;
 }
 
+/* the drawn pages' view (see Chimera::view in the engine crate); Speak's gets how far into its
+ * line the voice is, in ms of audio already played (-1: silent), after the "P|" */
+static int get_view(inst_t *in, char *buf, int len) {
+    for (int tries = 0; tries < 3; ++tries) {
+        uint32_t s0 = atomic_load_explicit(&in->view_seq, memory_order_acquire);
+        if (s0 & 1) continue;
+        memcpy(in->view_cache, in->view, VIEW_MAX);
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&in->view_seq, memory_order_relaxed) != s0) continue;
+        break;
+    }
+    in->view_cache[VIEW_MAX - 1] = 0;
+    if (in->view_cache[0] != 'P' || in->view_cache[1] != '|') return outf(buf, len, "%s", in->view_cache);
+    int64_t start = atomic_load_explicit(&in->speak_start, memory_order_relaxed);
+    uint64_t r = atomic_load_explicit(&in->aud_r, memory_order_relaxed);
+    long el = start < 0 ? -1 : (long)(((int64_t)r - start) * 1000 / (int64_t)in->sr);
+    if (start >= 0 && el < 0) el = 0;
+    return outf(buf, len, "P|%ld|%s", el, in->view_cache + 2);
+}
+
 static int get_param(void *instance, const char *key, char *buf, int len) {
     inst_t *in = instance;
     if (!in || !key || !buf || len <= 0) return -1;
     pub_drain(in);
-    if (!strcmp(key, "ui_hierarchy"))
-        return outf(buf, len, "%s", (int)in->val[CP_MODE] == CP_MODE_BEATBOX ? cp_ui_hierarchy_drums : cp_ui_hierarchy);
+    if (!strcmp(key, "ui_hierarchy")) return outf(buf, len, "%s", cp_ui_hierarchy);
     if (!strcmp(key, "chain_params")) return outf(buf, len, "%s", cp_chain_params);
-    if (!strcmp(key, "name")) return outf(buf, len, "CHIMERA");
+    if (!strcmp(key, "name")) return outf(buf, len, "CHIMERA Voice");
     if (!strcmp(key, "state")) return build_state(in, buf, len);
     if (!strcmp(key, "preset")) return outf(buf, len, "%d", in->preset);
     if (!strcmp(key, "preset_count")) return outf(buf, len, "%d", CP_PRESET_COUNT);
@@ -795,21 +862,18 @@ static int get_param(void *instance, const char *key, char *buf, int len) {
         return outf(buf, len, "ready=%d underruns=%u fill=%d engine=%s buffer=%d", atomic_load(&in->ready), atomic_load(&in->underruns),
                     (int)(atomic_load(&in->aud_w) - atomic_load(&in->aud_r)), atomic_load(&in->light) ? "light" : "full",
                     kBufferBlocks[atomic_load(&in->buffer)]);
-    if (!strcmp(key, "next_syllable")) {
-        /* a few tries, never a wait on the render thread: a torn read keeps the last good one */
-        for (int tries = 0; tries < 3; ++tries) {
-            uint32_t s0 = atomic_load_explicit(&in->syl_seq, memory_order_acquire);
-            if (s0 & 1) continue;
-            char tmp[SYL_MAX];
-            memcpy(tmp, in->syl, SYL_MAX);
-            atomic_thread_fence(memory_order_acquire);
-            if (atomic_load_explicit(&in->syl_seq, memory_order_relaxed) != s0) continue;
-            tmp[SYL_MAX - 1] = 0;
-            memcpy(in->syl_cache, tmp, SYL_MAX);
-            break;
-        }
-        return outf(buf, len, "%s", in->syl_cache);
+    /* Live values (the host reads <key>:effective every tick): Position is Sing's cursor, the
+     * Vowel knob where pad pressure has pushed it. Answered from the mirror, never from the
+     * render thread, so they keep moving while the host skips a silent slot's render. */
+    if (!strncmp(key, "position", 8) && (!key[8] || !strcmp(key + 8, ":effective") || !strcmp(key + 8, ":base")))
+        return outf(buf, len, "%u", atomic_load_explicit(&in->cursor, memory_order_relaxed));
+    if (!strcmp(key, "sweep:effective")) {
+        float s = in->val[CP_SWEEP];
+        if ((int)in->val[CP_MODE] == CP_MODE_VOWEL) s = clampf(s + in->val[CP_PRESS_AMT] * pressure_now(in), 0.0f, 1.0f);
+        return outf(buf, len, "%.4f", s);
     }
+    if (!strcmp(key, "sweep:base")) return outf(buf, len, "%.4f", in->val[CP_SWEEP]);
+    if (!strcmp(key, "chm_view")) return get_view(in, buf, len);
     int id = find_param(key);
     if (id < 0) return -1;
     if (cp_params[id].type == CP_ENUM || cp_params[id].type == CP_INT) return outf(buf, len, "%d", (int)in->val[id]);
@@ -834,17 +898,6 @@ static void render_block(void *instance, int16_t *out, int frames) {
     }
     pub_drain(in);
     uint64_t r = atomic_load_explicit(&in->aud_r, memory_order_relaxed);
-    /* the transport as of this block's first sample, for the worker's beat prediction */
-    double beat = g_host && g_host->get_beat_position ? g_host->get_beat_position() : -1.0;
-    double bpm = g_host && g_host->get_bpm ? g_host->get_bpm() : 120.0;
-    uint32_t s = atomic_load_explicit(&in->tr_seq, memory_order_relaxed);
-    atomic_store_explicit(&in->tr_seq, s + 1, memory_order_relaxed);
-    atomic_thread_fence(memory_order_release);
-    atomic_store_explicit(&in->tr_beat, beat, memory_order_relaxed);
-    atomic_store_explicit(&in->tr_bpm, bpm > 0 ? bpm : 120.0, memory_order_relaxed);
-    atomic_store_explicit(&in->tr_read, r, memory_order_relaxed);
-    atomic_store_explicit(&in->tr_seq, s + 2, memory_order_release);
-
     uint64_t w = atomic_load_explicit(&in->aud_w, memory_order_acquire);
     int avail = (int)(w - r);
     int n = avail < frames ? avail : frames;

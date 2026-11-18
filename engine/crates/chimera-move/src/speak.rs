@@ -21,7 +21,7 @@ use chimera::control::score::{ControlKey, Gesture};
 use chimera::engine::Engine;
 use chimera::math::midi_to_hz;
 use chimera::phonetics::english::EnglishG2P;
-use chimera::phonetics::planner::{PhraseInput, PlanOptions, plan_phrases};
+use chimera::phonetics::planner::{PhraseInput, PlanOptions, expand, plan_phrases};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
@@ -54,31 +54,75 @@ struct Request {
     key: LineKey,
 }
 
-/// A planned line: gestures (times from 0) sorted by when they start acting.
-/// Shared, so a line being spoken keeps its own gestures when a new plan arrives.
+/// A planned line: gestures (times from 0) sorted by when they start acting, and for the screen
+/// the text and when each of its words ends. Shared, so a line being spoken keeps its own when a
+/// new plan arrives.
 pub struct Line {
     serial: u64,
     gestures: Arc<[Gesture]>,
     end: f64,
+    words: Words,
+}
+
+/// The line's text as typed, and when each of its whitespace-separated words ends (s from the
+/// line's start; a word with no sound ends with the one before it).
+#[derive(Clone, Default)]
+pub struct Words {
+    pub text: Arc<str>,
+    pub ends: Arc<[f64]>,
+}
+
+/// A planned line: gestures sorted by start, its end, and its words' timing (allocates).
+pub struct Planned {
+    pub gestures: Vec<Gesture>,
+    pub end: f64,
+    pub words: Words,
 }
 
 /// The planned line for `key` (allocates).
-pub fn plan_line(g2p: &EnglishG2P, key: &LineKey) -> (Vec<Gesture>, f64) {
+pub fn plan_line(g2p: &EnglishG2P, key: &LineKey) -> Planned {
     let rate = key.rate.clamp(0.25, 4.0);
-    let inputs: Vec<PhraseInput> = g2p
-        .to_phrases(&key.text)
-        .into_iter()
-        .map(|p| PhraseInput { segments: p.segments, intonation: Some(p.intonation), pause: Some(p.pause / rate) })
+    let phrases = g2p.to_phrases(&key.text);
+    let inputs: Vec<PhraseInput> = phrases
+        .iter()
+        .map(|p| PhraseInput { segments: p.segments.clone(), intonation: Some(p.intonation), pause: Some(p.pause / rate) })
         .collect();
+    let text: Arc<str> = key.text.as_str().into();
     if inputs.is_empty() {
-        return (Vec::new(), 0.0);
+        return Planned { gestures: Vec::new(), end: 0.0, words: Words { text, ends: Arc::new([]) } };
     }
     let accent = ACCENT_AT_DEFAULT * key.expression.max(0.0) / EXPRESSION_DEFAULT;
     let plan = plan_phrases(&inputs, &PlanOptions { body: key.body, t0: 0.0, rate: Some(rate), f0: Some(REF_F0), accent: Some(accent), ..Default::default() });
+    // when each word said ends: the planner's timeline has one entry per segment, a diphthong two
+    let mut said = Vec::new();
+    let mut idx = 0;
+    for p in &phrases {
+        for s in &p.segments {
+            idx += expand(&s.ipa).map_or(1, |parts| parts.len());
+            if s.word_end == Some(true)
+                && let Some(ps) = plan.segments.get(idx - 1)
+            {
+                said.push(ps.t1);
+            }
+        }
+    }
+    let n_said: usize = phrases.iter().map(|p| p.words.len()).sum();
+    if idx != plan.segments.len() || said.len() != n_said {
+        // the timeline did not line up with the segments: spread the words evenly
+        said = (1..=n_said).map(|i| plan.end * i as f64 / n_said.max(1) as f64).collect();
+    }
+    // the typed words: each says as many words as the front end reads in it ("20" says one,
+    // "--" none)
+    let mut ends = Vec::new();
+    let mut k = 0usize;
+    for tok in key.text.split_whitespace() {
+        k += g2p.to_phrases(tok).iter().map(|p| p.words.len()).sum::<usize>();
+        ends.push(if k == 0 || said.is_empty() { 0.0 } else { said[k.min(said.len()) - 1] });
+    }
     let mut gs = plan.gestures;
     gs.sort_by(|a, b| start_of(a).total_cmp(&start_of(b)));
     let end = gs.iter().map(Gesture::end).fold(plan.end, f64::max);
-    (gs, end)
+    Planned { gestures: gs, end, words: Words { text, ends: ends.into() } }
 }
 
 /// when a gesture starts acting
@@ -97,6 +141,7 @@ struct Playing {
     tag: f64,
     /// the next gesture to hand to the voice
     idx: usize,
+    words: Words,
 }
 
 pub struct Speaker {
@@ -113,6 +158,8 @@ pub struct Speaker {
     next_tag: f64,
     scratch: Vec<Gesture>,
     g2p: Arc<EnglishG2P>,
+    /// bumped whenever what the screen shows changes (a new plan, a line starting or ending)
+    view_serial: u64,
 }
 
 /// The planner thread runs at normal priority. Threads inherit their creator's policy, and the
@@ -136,7 +183,7 @@ fn normal_priority() {}
 impl Speaker {
     /// Plans `key` now (on the caller's thread, before any audio) and starts the planner thread.
     pub fn new(g2p: Arc<EnglishG2P>, key: LineKey) -> Speaker {
-        let (gestures, end) = plan_line(&g2p, &key);
+        let first = plan_line(&g2p, &key);
         let shared = g2p.clone();
         let (req_tx, req_rx) = channel::<Request>();
         let (line_tx, line_rx) = channel::<Line>();
@@ -149,9 +196,9 @@ impl Speaker {
                     while let Ok(n) = req_rx.try_recv() {
                         r = n;
                     }
-                    let planned = std::panic::catch_unwind(|| plan_line(&g2p, &r.key));
-                    let (gestures, end) = planned.unwrap_or_default();
-                    if line_tx.send(Line { serial: r.serial, gestures: gestures.into(), end }).is_err() {
+                    let planned = std::panic::catch_unwind(|| plan_line(&g2p, &r.key))
+                        .unwrap_or_else(|_| Planned { gestures: Vec::new(), end: 0.0, words: Words::default() });
+                    if line_tx.send(Line { serial: r.serial, gestures: planned.gestures.into(), end: planned.end, words: planned.words }).is_err() {
                         return;
                     }
                 }
@@ -163,13 +210,14 @@ impl Speaker {
             thread,
             want: key,
             asked: 0,
-            line: Line { serial: 0, gestures: gestures.into(), end },
+            line: Line { serial: 0, gestures: first.gestures.into(), end: first.end, words: first.words },
             playing: None,
             pending: None,
             // Sing's tags are even numbers from 2 up; these never meet them
             next_tag: 1e9,
             scratch: Vec::with_capacity(512),
             g2p: shared,
+            view_serial: 1,
         }
     }
 
@@ -193,8 +241,20 @@ impl Speaker {
 
     /// no planner thread (it could not start): plan on this thread
     fn plan_here(&mut self) {
-        let (gestures, end) = plan_line(&self.g2p, &self.want);
-        self.line = Line { serial: self.asked, gestures: gestures.into(), end };
+        let p = plan_line(&self.g2p, &self.want);
+        self.line = Line { serial: self.asked, gestures: p.gestures.into(), end: p.end, words: p.words };
+        self.view_serial += 1;
+    }
+
+    /// What the Line page shows: the line being spoken, or else the one the next key speaks;
+    /// and the serial that changes whenever that does.
+    pub fn view(&self) -> (u64, &Words) {
+        (self.view_serial, self.playing.as_ref().map_or(&self.line.words, |p| &p.words))
+    }
+
+    /// Seconds since the line being spoken started, at the voice clock `now` (None: silent).
+    pub fn elapsed(&self, now: f64) -> Option<f64> {
+        self.playing.as_ref().map(|p| now - p.off)
     }
 
     pub fn wanted(&self) -> &LineKey {
@@ -226,7 +286,8 @@ impl Speaker {
         }
         let tag = self.next_tag;
         self.next_tag += 1.0;
-        self.playing = Some(Playing { gestures: self.line.gestures.clone(), end: self.line.end, off: eng.clock() + LEAD, ratio: midi_to_hz(note as f64) / REF_F0, breath: crate::sing::breath_for(velocity), tag, idx: 0 });
+        self.playing = Some(Playing { gestures: self.line.gestures.clone(), end: self.line.end, off: eng.clock() + LEAD, ratio: midi_to_hz(note as f64) / REF_F0, breath: crate::sing::breath_for(velocity), tag, idx: 0, words: self.line.words.clone() });
+        self.view_serial += 1;
     }
 
     /// End the line being spoken (its gestures ramp out; those not begun are dropped).
@@ -234,6 +295,7 @@ impl Speaker {
         self.pending = None;
         if let Some(p) = self.playing.take() {
             eng.release(p.tag);
+            self.view_serial += 1;
         }
     }
 
@@ -245,6 +307,7 @@ impl Speaker {
                 Ok(l) => {
                     if l.serial > self.line.serial {
                         self.line = l;
+                        self.view_serial += 1;
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -291,6 +354,7 @@ impl Speaker {
         }
         if p.idx >= gs.len() && now > p.off + p.end + TAIL {
             self.playing = None;
+            self.view_serial += 1;
         }
     }
 }

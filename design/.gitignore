@@ -1,0 +1,8 @@
+# Renders of the reference head and photos found on the web: working material, not ours to keep
+# in the repo. Everything here is re-made by the scripts from the model (see README.md).
+*.npy
+*.jpg
+reference-*.png
+front-ref-*.png
+key_*.png
+m34-compare.png

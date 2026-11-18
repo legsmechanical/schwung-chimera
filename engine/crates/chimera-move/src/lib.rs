@@ -1,50 +1,47 @@
-//! CHIMERA on the Move: the performer between the Schwung plugin and the engine.
+//! CHIMERA Voice on the Move: the performer between the Schwung plugin and the engine.
 //!
 //! The plugin (src/dsp/chimera_plugin.c) owns the host API, the parameter mirror and a render
 //! thread; every call into this crate comes from that ONE thread, never from the audio callback.
-//! So everything here may allocate (planning a sung note does, a body or creature switch builds a
-//! new airway) and none of it is real-time code in the host's sense. What it must do is keep the
-//! render thread ahead of the callback, which the light engine is sized for.
+//! So everything here may allocate (planning a sung note does, a body switch builds a new airway)
+//! and none of it is real-time code in the host's sense. What it must do is keep the render
+//! thread ahead of the callback, which the light engine is sized for.
 //!
 //! What a key does depends on the mode:
-//! - Sing: the next syllable of the lyrics at the key's pitch. A key pressed while another is
-//!   down sings legato; letting go of the sounding key while another is held glides back to it.
-//!   Velocity sets the breath. (A port of the app's `src/ui/singing.ts`.)
 //! - Speak: the key speaks the whole line (the lyrics) at its pitch; a key pressed while the
 //!   line is spoken starts it again. Planned on a thread of its own (see `speak`).
-//! - Vowel: the key sets the pitch and opens the breath; the mouth is the Mouth/Throat pages.
-//! - Beatbox: the key's pitch class picks a sound (see `BEAT_KEYS`); the pattern follows Move's
-//!   transport.
-//! - Songbird / Seal / Gator / Elephant: the key sets the creature's pitch and breathes, or plays
-//!   one of its calls at that pitch (the Keys param).
+//! - Sing: the next syllable of the lyrics at the key's pitch. A key pressed while another is
+//!   down sings legato; letting go of the sounding key while another is held glides back to it.
+//!   Velocity sets the breath. (A port of the app's `src/ui/singing.ts`.) Position is the
+//!   syllable the next key sings.
+//! - Vowel: the key sets the pitch and opens the breath (velocity sets how much); the mouth is
+//!   the Mouth/Throat knobs. The Vowel knob runs the mouth along a path of vowels (Oo Oh Ah Eh
+//!   Ee) and pad pressure pushes it further along, by the Pressure knob's amount and direction.
 
-mod mic;
+mod limiter;
 mod params_gen;
 pub mod sing;
 pub mod speak;
 
 use chimera::anatomy::human::{ArticKey, ArticPatch, BodyMix};
-use chimera::creatures::creature_by_id;
 use chimera::engine::Engine;
 use chimera::math::midi_to_hz;
-use chimera::control::beat_player::BeatPlayer;
-use chimera::phonetics::beatbox::{BEAT_PRESETS, BeatStep, beat_ready, parse_beat};
 use chimera::phonetics::english::EnglishG2P;
 use chimera::phonetics::planner::vowel_artic;
 use chimera::voice::human_voice::SourcePatch;
 pub use params_gen::*;
 use std::ffi::{CStr, c_char};
+use std::fmt::Write as _;
 use std::io::Read;
 use std::sync::Arc;
-
-/// Beatbox: a key's pitch class -> sound. A, A# and B hum a bass note at the key's own pitch.
-pub const BEAT_KEYS: [&str; 12] = ["B", "P!", "Pf", "K", "t", "tss", "!", "^K", "kch", "m", "m", "m"];
 
 /// Speak's make-up gain: a spoken line's level (rms) to a sung note's
 const SPEAK_GAIN: f64 = 1.9;
 
 /// Bodies are rebuilt (a new airway, several ms of work) only once the knobs have rested this long.
 const BODY_SETTLE_S: f64 = 0.12;
+
+/// The mouth knobs a vowel puts the mouth at: per param id, NaN where the vowel says nothing.
+type Posture = [f64; N_PARAMS];
 
 pub struct Chimera {
     fs: f64,
@@ -55,20 +52,21 @@ pub struct Chimera {
     lyrics: String,
     sing: sing::Singer,
     speak: speak::Speaker,
-    /// keys down in Vowel / creature modes, oldest first
-    held: Vec<u8>,
+    /// Vowel: keys down (note, velocity), oldest first
+    held: Vec<(u8, u8)>,
     /// the body the engine has, and how long the knobs have rested on a different one
     body: BodyMix,
     body_rest: f64,
-    /// beatbox: the sequencer is locked to the transport
-    beat_synced: bool,
+    /// the Vowel knob's path for `body`: one posture per vowel on it
+    path: Vec<Posture>,
+    /// Vowel: pad pressure, 0..1
+    pressure: f64,
     gain: f32,
-    /// beatbox's close-mic chain, and the output limiter every mode goes through
-    mic: mic::Mic,
-    limiter: mic::Limiter,
-    /// values the controller changed itself (picking a vowel sets the mouth, picking a pattern
-    /// its swing), for the plugin's mirror
+    limiter: limiter::Limiter,
+    /// values the controller changed itself (picking a vowel or turning the Vowel knob sets the
+    /// mouth), for the plugin's mirror
     published: Vec<(usize, f64)>,
+    view: String,
 }
 
 fn source_patch(s: Src, v: f64) -> SourcePatch {
@@ -87,18 +85,19 @@ fn source_patch(s: Src, v: f64) -> SourcePatch {
     p
 }
 
-/// Map a key to a creature's pitch range: whole-octave shift so middle C lands near the middle
-/// of the range, stragglers folded in (the app's `creatureKeyHz`).
-fn creature_key_hz(midi: f64, min: f64, max: f64) -> f64 {
-    let shift = ((min * max).sqrt() / midi_to_hz(60.0)).log2().round();
-    let mut f = midi_to_hz(midi) * 2f64.powf(shift);
-    while f > max {
-        f /= 2.0;
+/// A vowel's calibrated posture for a body, as mouth-knob values.
+fn posture(i: usize, body: BodyMix) -> Option<(Posture, ArticPatch)> {
+    let patch = vowel_artic(VOWEL_IPA.get(i)?, body)?;
+    let mut k = [f64::NAN; N_PARAMS];
+    for (id, d) in DRIVES.iter().enumerate() {
+        if let Drive::Artic(a, lo, hi) = *d
+            && let Some(x) = patch.get(ArticKey::ALL[a])
+            && hi != lo
+        {
+            k[id] = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+        }
     }
-    while f < min {
-        f *= 2.0;
-    }
-    f.min(max)
+    Some((k, patch))
 }
 
 impl Chimera {
@@ -126,11 +125,12 @@ impl Chimera {
             held: Vec::with_capacity(16),
             body: BodyMix::MALE,
             body_rest: 0.0,
-            beat_synced: false,
+            path: Vec::new(),
+            pressure: 0.0,
             gain: DEFAULTS[P_VOLUME] as f32,
-            mic: mic::Mic::new(fs),
-            limiter: mic::Limiter::new(fs),
+            limiter: limiter::Limiter::new(fs),
             published: Vec::new(),
+            view: String::with_capacity(2048),
         };
         c.sing.set_lyrics(params_gen_default_lyrics(), &c.g2p);
         c.apply_all();
@@ -145,13 +145,13 @@ impl Chimera {
         self.p[P_MODE] as usize
     }
 
-    fn creature_slot(&self) -> Option<usize> {
-        let m = self.mode();
-        (MODE_FIRST_CREATURE..MODE_FIRST_CREATURE + 4).contains(&m).then(|| m - MODE_FIRST_CREATURE)
-    }
-
     fn body_mix(&self) -> BodyMix {
         BodyMix::new(self.p[P_FEMALE], self.p[P_CHILD])
+    }
+
+    /// The Vowel knob's path for the engine's body.
+    fn build_path(&mut self) {
+        self.path = SWEEP_PATH.iter().filter_map(|&i| posture(i, self.body).map(|p| p.0)).collect();
     }
 
     /// Send every param to a fresh engine (start, quality switch).
@@ -160,50 +160,81 @@ impl Chimera {
         if self.body != BodyMix::MALE {
             self.eng.set_body(self.body);
         }
+        self.build_path();
         for id in 0..N_PARAMS {
-            if id != P_MODE && id != P_VOWEL {
-                self.apply(id, true);
+            if id != P_MODE && id != P_VOWEL && !matches!(DRIVES[id], Drive::Artic(..)) {
+                self.apply(id);
             }
         }
-        self.enter_mode(self.mode());
+        self.enter_mode();
     }
 
     /// A param changed (`v` already stored).
-    fn apply(&mut self, id: usize, all: bool) {
+    fn apply(&mut self, id: usize) {
         let v = self.p[id];
         match DRIVES[id] {
             Drive::Source(s) => self.eng.set_source(&source_patch(s, v)),
-            Drive::Artic(k, lo, hi) => {
-                if self.mode() != MODE_BEATBOX {
-                    let mut a = ArticPatch::default();
-                    a.set(ArticKey::ALL[k], lo + v * (hi - lo));
-                    self.eng.set_artic(&a, Some(true));
-                }
-            }
-            Drive::Creature(mode, cid, key) => {
-                if self.mode() == mode
-                    && let Some(i) = creature_by_id(cid).and_then(|d| d.param_index(key))
-                {
-                    self.eng.set_creature_params(&[(i, v)]);
-                }
-            }
+            Drive::Artic(..) => self.apply_mouth(),
             Drive::Own => match id {
                 P_FEMALE | P_CHILD => self.body_rest = 0.0,
                 P_VIBRATO => self.update_vibrato(),
                 P_WHISPER => self.eng.set_source(&SourcePatch { voiced: Some(v < 0.5), ..Default::default() }),
                 P_VOLUME => self.gain = v as f32,
-                // Keys decides whether a held key breathes (Pitch) or plays a call
-                P_HOLD | P_SB_HOLD | P_SE_HOLD | P_GA_HOLD | P_EL_HOLD | P_SB_KEYS | P_SE_KEYS | P_GA_KEYS | P_EL_KEYS => self.update_gate(),
+                P_HOLD => self.update_gate(),
                 // a set Vowel is only remembered: the mouth is its own knobs (a restored state's,
-                // a preset's); `pick_vowel` is what moves the mouth to the vowel
-                P_PATTERN => self.set_pattern(v as usize, false),
-                P_SWING => self.eng.set_beat_tempo(None, Some(v)),
-                P_MODE if !all => self.enter_mode(v as usize),
-                P_MIC => self.mic.reset(),
+                // a preset's); `pick_vowel` / `pick_sweep` are what move the mouth
+                P_SWEEP | P_PRESS_AMT => self.apply_mouth(),
                 P_RATE | P_EXPRESSION => self.want_line(),
                 _ => {}
             },
         }
+    }
+
+    /// The path at x (0..1), per param id: NaN where a vowel on it says nothing.
+    fn path_at(&self, x: f64) -> Posture {
+        let n = self.path.len();
+        if n == 0 {
+            return [f64::NAN; N_PARAMS];
+        }
+        if n == 1 {
+            return self.path[0];
+        }
+        let f = x.clamp(0.0, 1.0) * (n - 1) as f64;
+        let i = (f.floor() as usize).min(n - 2);
+        let t = f - i as f64;
+        let (a, b) = (&self.path[i], &self.path[i + 1]);
+        let mut out = [f64::NAN; N_PARAMS];
+        for id in 0..N_PARAMS {
+            out[id] = a[id] + (b[id] - a[id]) * t;
+        }
+        out
+    }
+
+    /// Where pad pressure has pushed the Vowel knob (its own value without pressure).
+    pub fn sweep_effective(&self) -> f64 {
+        let s = self.p[P_SWEEP];
+        if self.mode() != MODE_VOWEL {
+            return s;
+        }
+        (s + self.p[P_PRESS_AMT] * self.pressure).clamp(0.0, 1.0)
+    }
+
+    /// The mouth to the engine: the knobs, moved along the Vowel path by as much as pressure
+    /// moved the Vowel knob.
+    fn apply_mouth(&mut self) {
+        let s = self.p[P_SWEEP];
+        let se = self.sweep_effective();
+        let push = se != s;
+        let (a, b) = if push { (self.path_at(s), self.path_at(se)) } else { ([0.0; N_PARAMS], [0.0; N_PARAMS]) };
+        let mut patch = ArticPatch::default();
+        for id in 0..N_PARAMS {
+            if let Drive::Artic(k, lo, hi) = DRIVES[id] {
+                let d = b[id] - a[id];
+                let v = (self.p[id] + if d.is_finite() { d } else { 0.0 }).clamp(0.0, 1.0);
+                patch.set(ArticKey::ALL[k], lo + v * (hi - lo));
+            }
+        }
+        self.eng.set_artic(&patch, Some(true));
     }
 
     /// Engine: Light or Full. A new engine with every param sent again; the dictionary (the slow
@@ -216,18 +247,19 @@ impl Chimera {
         self.speak.cut(&mut self.eng);
         self.held.clear();
         self.eng = Engine::with_light(self.fs, light);
-        self.beat_synced = false;
         self.apply_all();
     }
 
     /// Set a param (the plugin's set_param / a preset / a restored state). Writing the value a
-    /// param already has does nothing: scenes and LFOs re-write values every block.
+    /// param already has does nothing: scenes and LFOs re-write values every block. Position is
+    /// the exception: playing moves it, so a write always moves the cursor.
     pub fn set(&mut self, id: usize, v: f64) {
         if id >= N_PARAMS || !v.is_finite() {
             return;
         }
-        if id == P_RESTART {
-            self.sing.restart();
+        if id == P_POSITION {
+            self.p[id] = v;
+            self.sing.set_cursor(v.max(0.0) as usize);
             return;
         }
         let prev = self.p[id];
@@ -237,18 +269,30 @@ impl Chimera {
         self.p[id] = v;
         if id == P_MODE {
             if (prev as usize) != (v as usize) {
-                self.leave_mode(prev as usize);
-                self.enter_mode(v as usize);
+                self.leave_mode();
+                self.enter_mode();
             }
             return;
         }
-        self.apply(id, false);
+        self.apply(id);
     }
 
     pub fn set_lyrics(&mut self, text: &str) {
         self.lyrics = text.to_string();
         self.sing.set_lyrics(text, &self.g2p);
         self.want_line();
+    }
+
+    /// Vowel: pad pressure (0..1).
+    pub fn set_pressure(&mut self, p: f64) {
+        let p = if p.is_finite() { p.clamp(0.0, 1.0) } else { 0.0 };
+        if p == self.pressure {
+            return;
+        }
+        self.pressure = p;
+        if self.mode() == MODE_VOWEL {
+            self.apply_mouth();
+        }
     }
 
     /// Speak's line for the lyrics, body, Rate and Expression now; planned only in Speak mode
@@ -270,71 +314,48 @@ impl Chimera {
         self.speak.speaking()
     }
 
+    /// The engine's jaw as it is now (for tests).
+    pub fn eng_artic_jaw(&self) -> f64 {
+        self.eng.voice().artic.x.get(ArticKey::Jaw)
+    }
+
+    /// Speak: seconds since the line being spoken started (None: none is).
+    pub fn speak_elapsed(&self) -> Option<f64> {
+        self.speak.elapsed(self.eng.clock())
+    }
+
     fn update_vibrato(&mut self) {
         // sung notes carry their own vibrato gesture; the source's is for Vowel mode
         let depth = if self.mode() == MODE_VOWEL { self.p[P_VIBRATO] } else { 0.0 };
         self.eng.set_source(&SourcePatch { vibrato_depth: Some(depth), ..Default::default() });
     }
 
-    fn hold_on(&self) -> bool {
-        match self.mode() {
-            MODE_VOWEL => self.p[P_HOLD] > 0.5,
-            m if m >= MODE_FIRST_CREATURE => self.p[CREATURE_KEYS[m - MODE_FIRST_CREATURE].1] > 0.5,
-            _ => false,
-        }
-    }
-
-    /// Keys breathe in Vowel mode and while a creature's keys set its pitch; sung notes and
-    /// beatbox sounds bring their own breath, and calls theirs.
+    /// Vowel: keys breathe, as hard as the latest key was struck; Hold breathes with no key.
+    /// Sung notes and spoken lines bring their own breath.
     fn update_gate(&mut self) {
-        let keys_breathe = match self.mode() {
-            MODE_VOWEL => true,
-            m if m >= MODE_FIRST_CREATURE => self.p[CREATURE_KEYS[m - MODE_FIRST_CREATURE].0] < 0.5,
-            _ => false,
+        let level = if self.mode() != MODE_VOWEL {
+            0.0
+        } else if let Some(&(_, vel)) = self.held.last() {
+            sing::breath_for(vel)
+        } else if self.p[P_HOLD] > 0.5 {
+            1.0
+        } else {
+            0.0
         };
-        let on = self.hold_on() || (keys_breathe && !self.held.is_empty());
-        self.eng.set_gate(if on { 1.0 } else { 0.0 });
+        self.eng.set_gate(level);
     }
 
-    fn leave_mode(&mut self, m: usize) {
+    fn leave_mode(&mut self) {
         self.sing.stop(&mut self.eng);
         self.speak.cut(&mut self.eng);
         self.held.clear();
+        self.pressure = 0.0;
         self.eng.set_gate(0.0);
-        if m == MODE_BEATBOX {
-            self.eng.set_beat_playing(false);
-            self.beat_synced = false;
-        }
     }
 
-    fn enter_mode(&mut self, m: usize) {
-        if let Some(slot) = (MODE_FIRST_CREATURE..MODE_FIRST_CREATURE + 4).contains(&m).then(|| m - MODE_FIRST_CREATURE) {
-            let def = creature_by_id(CREATURE_IDS[slot]);
-            let initial: Vec<(usize, f64)> = match def {
-                Some(d) => (0..N_PARAMS)
-                    .filter_map(|id| match DRIVES[id] {
-                        Drive::Creature(mm, _, key) if mm == m => d.param_index(key).map(|i| (i, self.p[id])),
-                        _ => None,
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            self.eng.set_creature(def, &initial);
-        } else {
-            self.eng.set_creature(None, &[]);
-            if m == MODE_BEATBOX {
-                // a beatboxer waits with the jaw nearly closed; the sounds bring their own breath
-                self.eng.set_artic(&beat_ready(self.body), Some(true));
-                self.set_pattern(self.p[P_PATTERN] as usize, false);
-            } else {
-                // the performer's mouth comes back (Sing sings from it as the base posture)
-                for id in 0..N_PARAMS {
-                    if let Drive::Artic(..) = DRIVES[id] {
-                        self.apply(id, true);
-                    }
-                }
-            }
-        }
+    fn enter_mode(&mut self) {
+        // the performer's mouth (Sing sings from it as the base posture)
+        self.apply_mouth();
         self.update_vibrato();
         self.update_gate();
         self.want_line();
@@ -343,131 +364,41 @@ impl Chimera {
     /// The player picked a vowel: the mouth moves to its calibrated posture and the mouth knobs
     /// follow (published back to the plugin).
     pub fn pick_vowel(&mut self, i: usize) {
-        if i >= VOWEL_IPA.len() {
-            return;
-        }
+        let Some((k, patch)) = posture(i, self.body_mix()) else { return };
         self.p[P_VOWEL] = i as f64;
-        self.set_vowel(i);
+        self.take_posture(&k);
+        // what the vowel says beyond the knobs (the posture is the new body's during a body
+        // change's settle time: that is what stays)
+        self.eng.set_artic(&patch, Some(true));
+        self.apply_mouth();
     }
 
-    /// The player picked a pattern: its steps, and its own swing (published back).
-    pub fn pick_pattern(&mut self, i: usize) {
-        self.p[P_PATTERN] = i as f64;
-        self.set_pattern(i, true);
+    /// The player turned the Vowel knob: the mouth knobs move to its place on the path.
+    pub fn pick_sweep(&mut self) {
+        let k = self.path_at(self.p[P_SWEEP]);
+        self.take_posture(&k);
+        self.apply_mouth();
     }
 
-    /// The vowel's posture for the body the knobs ask for (during a body change's settle time
-    /// the engine still has the old one; the posture is the new body's, which is what stays).
-    fn set_vowel(&mut self, i: usize) {
-        let Some(ipa) = VOWEL_IPA.get(i) else { return };
-        let Some(patch) = vowel_artic(ipa, self.body_mix()) else { return };
-        for id in 0..N_PARAMS {
-            if let Drive::Artic(k, lo, hi) = DRIVES[id]
-                && let Some(x) = patch.get(ArticKey::ALL[k])
-                && hi != lo
-            {
-                let v = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    fn take_posture(&mut self, k: &Posture) {
+        for (id, &v) in k.iter().enumerate() {
+            if v.is_finite() && matches!(DRIVES[id], Drive::Artic(..)) {
                 self.p[id] = v;
                 self.published.push((id, v));
             }
         }
-        if self.mode() != MODE_BEATBOX {
-            self.eng.set_artic(&patch, Some(true));
-        }
-    }
-
-    /// A pattern's steps, and with `take_swing` its own swing (published back).
-    fn set_pattern(&mut self, i: usize, take_swing: bool) {
-        if i == 0 {
-            self.eng.set_beat_playing(false);
-            self.beat_synced = false;
-            return;
-        }
-        if let Some(pr) = BEAT_PRESETS.get(i - 1) {
-            self.eng.set_beat_steps(&parse_beat(pr.text));
-            if take_swing {
-                self.p[P_SWING] = pr.swing;
-                self.published.push((P_SWING, pr.swing));
-            }
-            self.eng.set_beat_tempo(None, Some(self.p[P_SWING]));
-        }
-    }
-
-    /// The host transport at this engine's clock (`beat` < 0: stopped).
-    pub fn transport(&mut self, beat: f64, bpm: f64) {
-        let wants = self.mode() == MODE_BEATBOX && self.p[P_PATTERN] >= 1.0 && beat >= 0.0 && bpm > 0.0;
-        if !wants {
-            if self.beat_synced {
-                self.eng.set_beat_playing(false);
-                self.beat_synced = false;
-            }
-            return;
-        }
-        // a tempo outside what a beatboxer can play is followed at half or double time
-        let (mut beat, mut bpm) = (beat, bpm);
-        while bpm > BeatPlayer::MAX_BPM {
-            bpm *= 0.5;
-            beat *= 0.5;
-        }
-        while bpm < BeatPlayer::MIN_BPM {
-            bpm *= 2.0;
-            beat *= 2.0;
-        }
-        // locked: re-anchor when the tempo moved by more than 0.1% (Move's measured tempo
-        // wobbles in its last digits from beat to beat), or the phase drifted by > 1/50 beat, or
-        // the transport jumped. A re-anchor never skips or repeats a step.
-        let drift = (self.eng.beat().beat_at(self.eng.voice().clock) - beat).abs();
-        if !self.beat_synced || (self.eng.beat().bpm - bpm).abs() > bpm * 1e-3 || drift > 0.02 {
-            self.eng.sync_beat(beat, bpm);
-            self.beat_synced = true;
-        }
     }
 
     pub fn note_on(&mut self, note: u8, velocity: u8) {
-        let midi = note as f64;
         match self.mode() {
             MODE_SING => self.sing.note_on(&mut self.eng, note, velocity, self.body, self.p[P_VIBRATO]),
             MODE_SPEAK => self.speak.note_on(&mut self.eng, note, velocity),
-            MODE_BEATBOX => {
-                let id = BEAT_KEYS[note as usize % 12];
-                let mut step = BeatStep::new(id);
-                if id == "m" {
-                    // a hum sits low: fold the key into E1..D#3
-                    let mut n = midi;
-                    while n > 51.0 {
-                        n -= 12.0;
-                    }
-                    while n < 28.0 {
-                        n += 12.0;
-                    }
-                    step.note = Some(n);
-                }
-                step.accent = Some((velocity as f64 / 100.0).clamp(0.5, 1.27));
-                self.eng.beat_hit(&step);
-            }
-            m => {
-                self.held.retain(|&k| k != note);
-                self.held.push(note);
-                if m == MODE_VOWEL {
-                    self.eng.set_source(&SourcePatch::f0(midi_to_hz(midi)));
-                } else if let Some(slot) = self.creature_slot() {
-                    self.creature_note(slot, midi, true);
-                }
+            _ => {
+                self.held.retain(|&(k, _)| k != note);
+                self.held.push((note, velocity));
+                self.eng.set_source(&SourcePatch::f0(midi_to_hz(note as f64)));
                 self.update_gate();
             }
-        }
-    }
-
-    fn creature_note(&mut self, slot: usize, midi: f64, pressed: bool) {
-        let Some(def) = creature_by_id(CREATURE_IDS[slot]) else { return };
-        let Some(pi) = def.params.iter().position(|p| p.role == Some(chimera::creatures::types::ParamRole::Pitch)) else { return };
-        let pp = &def.params[pi];
-        let f = creature_key_hz(midi, pp.min, pp.max);
-        let keys = self.p[CREATURE_KEYS[slot].0] as usize;
-        if keys == 0 {
-            self.eng.set_creature_params(&[(pi, f)]);
-        } else if pressed {
-            self.eng.play_call(keys - 1, Some(f), None);
         }
     }
 
@@ -475,18 +406,12 @@ impl Chimera {
         match self.mode() {
             MODE_SING => self.sing.note_off(&mut self.eng, note, self.body, self.p[P_VIBRATO]),
             // a spoken line plays out
-            MODE_SPEAK | MODE_BEATBOX => {}
+            MODE_SPEAK => {}
             _ => {
-                self.held.retain(|&k| k != note);
+                self.held.retain(|&(k, _)| k != note);
                 // fall back to the most recent key still held (legato)
-                if let Some(&last) = self.held.last() {
-                    if self.mode() == MODE_VOWEL {
-                        self.eng.set_source(&SourcePatch::f0(midi_to_hz(last as f64)));
-                    } else if let Some(slot) = self.creature_slot()
-                        && self.p[CREATURE_KEYS[slot].0] < 0.5
-                    {
-                        self.creature_note(slot, last as f64, false);
-                    }
+                if let Some(&(last, _)) = self.held.last() {
+                    self.eng.set_source(&SourcePatch::f0(midi_to_hz(last as f64)));
                 }
                 self.update_gate();
             }
@@ -510,25 +435,19 @@ impl Chimera {
                 self.sing.stop(&mut self.eng);
                 self.speak.cut(&mut self.eng);
                 self.eng.set_body(self.body);
+                self.build_path();
+                self.apply_mouth();
                 self.want_line();
                 self.update_vibrato();
                 self.update_gate();
-                if self.mode() == MODE_BEATBOX {
-                    self.eng.set_artic(&beat_ready(self.body), Some(true));
-                }
             }
         }
         self.speak.tick(&mut self.eng, out.len() as f64 / self.fs);
         self.eng.render(out);
         // speech sits ~6 dB under a sung note at the same breath: brought up to match
         let g = self.gain as f64 * if self.mode() == MODE_SPEAK { SPEAK_GAIN } else { 1.0 };
-        let mic = self.mode() == MODE_BEATBOX && self.p[P_MIC] > 0.5;
         for s in out.iter_mut() {
-            let mut x = *s as f64;
-            if mic {
-                x = self.mic.run(x);
-            }
-            *s = self.limiter.run(x * g) as f32;
+            *s = self.limiter.run(*s as f64 * g) as f32;
         }
     }
 
@@ -542,14 +461,48 @@ impl Chimera {
         n
     }
 
-    /// The syllable the next key sings (Sing mode), for the screen.
-    pub fn next_syllable(&self) -> &str {
-        self.sing.next_text()
+    /// The syllable the next key sings (Sing mode).
+    pub fn cursor(&self) -> usize {
+        self.sing.cursor()
     }
 
-    /// The beat step under the playhead (−1 when the pattern is not playing).
-    pub fn beat_step(&self) -> i64 {
-        self.eng.beat_step()
+    /// Changes whenever `view` would.
+    pub fn view_serial(&self) -> u64 {
+        match self.mode() {
+            MODE_SPEAK => self.speak.view().0 * 4,
+            MODE_SING => self.sing.serial() * 4 + 1,
+            _ => 2,
+        }
+    }
+
+    /// What the mode's drawn page shows (the plugin serves it as `chm_view`):
+    ///   Speak  P|<when each word ends, ms from the line's start, comma separated>|<the line>
+    ///   Sing   S|<the syllables: each one's text, then ' ' at a word's end or SYL_SEP within it>
+    ///   Vowel  (nothing: its page draws from its knobs)
+    /// The plugin adds how far into the line the voice is (Speak).
+    pub fn view(&mut self) -> &str {
+        let mut v = std::mem::take(&mut self.view);
+        v.clear();
+        match self.mode() {
+            MODE_SPEAK => {
+                let (_, w) = self.speak.view();
+                v.push_str("P|");
+                for (i, e) in w.ends.iter().enumerate() {
+                    let _ = write!(v, "{}{}", if i > 0 { "," } else { "" }, (e * 1000.0).round() as i64);
+                }
+                v.push('|');
+                v.push_str(&w.text);
+            }
+            MODE_SING => {
+                let mut s = String::new();
+                self.sing.view(&mut s);
+                v.push_str("S|");
+                v.push_str(&s);
+            }
+            _ => {}
+        }
+        self.view = v;
+        &self.view
     }
 }
 
@@ -648,8 +601,15 @@ pub unsafe extern "C" fn chm_pick_vowel(h: *mut Handle, i: u32) {
 /// # Safety
 /// `h` is live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_pick_pattern(h: *mut Handle, i: u32) {
-    guard(h, |c| c.pick_pattern(i as usize));
+pub unsafe extern "C" fn chm_pick_sweep(h: *mut Handle) {
+    guard(h, |c| c.pick_sweep());
+}
+
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_set_pressure(h: *mut Handle, p: f64) {
+    guard(h, |c| c.set_pressure(p));
 }
 
 /// # Safety
@@ -689,13 +649,6 @@ pub unsafe extern "C" fn chm_all_notes_off(h: *mut Handle) {
 }
 
 /// # Safety
-/// `h` is live.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_transport(h: *mut Handle, beat: f64, bpm: f64) {
-    guard(h, |c| c.transport(beat, bpm));
-}
-
-/// # Safety
 /// `h` is live; `ids` and `vals` hold `max` entries.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chm_take_published(h: *mut Handle, ids: *mut u32, vals: *mut f64, max: usize) -> usize {
@@ -705,12 +658,45 @@ pub unsafe extern "C" fn chm_take_published(h: *mut Handle, ids: *mut u32, vals:
     n
 }
 
-/// The next syllable, NUL-terminated into `buf` (cut at a character boundary). Returns its length.
+/// Sing: the syllable the next key sings.
+///
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_cursor(h: *mut Handle) -> u32 {
+    let mut n = 0;
+    guard(h, |c| n = c.cursor() as u32);
+    n
+}
+
+/// Speak: seconds since the line being spoken started, at the end of the last block rendered;
+/// -1 when none is.
+///
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_speak_elapsed(h: *mut Handle) -> f64 {
+    let mut e = -1.0;
+    guard(h, |c| e = c.speak_elapsed().unwrap_or(-1.0));
+    e
+}
+
+/// # Safety
+/// `h` is live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_view_serial(h: *mut Handle) -> u64 {
+    let mut s = 0;
+    guard(h, |c| s = c.view_serial());
+    s
+}
+
+/// The mode's view (see `Chimera::view`), NUL-terminated into `buf` (cut at a character
+/// boundary). Returns its length.
 ///
 /// # Safety
 /// `h` is live; `buf` holds `cap` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chm_next_syllable(h: *mut Handle, buf: *mut u8, cap: usize) -> usize {
+pub unsafe extern "C" fn chm_view(h: *mut Handle, buf: *mut u8, cap: usize) -> usize {
     if cap == 0 {
         return 0;
     }
@@ -718,7 +704,7 @@ pub unsafe extern "C" fn chm_next_syllable(h: *mut Handle, buf: *mut u8, cap: us
     buf[0] = 0;
     let mut n = 0;
     guard(h, |c| {
-        let s = c.next_syllable();
+        let s = c.view();
         let mut k = s.len().min(cap - 1);
         while !s.is_char_boundary(k) {
             k -= 1;

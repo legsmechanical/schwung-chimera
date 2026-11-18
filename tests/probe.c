@@ -1,8 +1,8 @@
 /*
  * Load dist/chimera/dsp.so the way the host does and play it at real-time pace: a block every
- * 2.9 ms from this thread (standing in for the SPI callback), notes in every mode, a running
- * transport for the beatbox pattern. Reports how long the engine takes to come up, underruns,
- * output level per mode, and the slowest render_block call. Writes the audio to a WAV.
+ * 2.9 ms from this thread (standing in for the SPI callback), notes in every mode, pad pressure,
+ * the drawn pages' live values. Reports how long the engine takes to come up, underruns, output
+ * level per mode, and the slowest render_block call. Writes the audio to a WAV.
  *
  *   probe <module dir> <out.wav>          (on the Move, from a COPY of dist/chimera: it writes
  *                                          and removes <module dir>/config.json)
@@ -126,17 +126,10 @@ int main(int argc, char **argv) {
     worst_call = 0;
 
     const int notes[4] = {60, 62, 64, 67};
-    static const char *const modes[] = {"Sing", "Speak", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"};
-    for (int mode = 0; mode < 8; ++mode) {
+    static const char *const modes[] = {"Speak", "Sing", "Vowel"};
+    for (int mode = 0; mode < 3; ++mode) {
         api->set_param(inst, "mode", modes[mode]);
         run(0.3);
-        if (!strcmp(modes[mode], "Beatbox")) {
-            g_beat = 0.0;
-            double r = run(2.4);
-            printf("mode %d pattern rms %.4f    ", mode, r);
-            g_beat = -1.0;
-            status("");
-        }
         double acc = 0;
         for (int i = 0; i < 4; ++i) {
             midi(0x90, (uint8_t)notes[i], 100);
@@ -153,9 +146,22 @@ int main(int argc, char **argv) {
     api->set_param(inst, "mode", "Speak");
     run(0.3);
     midi(0x90, 48, 100);
-    double rs = run(3.0);
+    double rs = run(1.0);
+    {
+        /* the Line page: how far into the line, growing with the audio played */
+        char v1[4096], v2[4096];
+        api->get_param(inst, "chm_view", v1, sizeof v1);
+        rs += run(0.5);
+        api->get_param(inst, "chm_view", v2, sizeof v2);
+        long e1 = v1[0] == 'P' ? atol(v1 + 2) : -9, e2 = v2[0] == 'P' ? atol(v2 + 2) : -9;
+        int ok = e1 > 800 && e1 < 1300 && e2 - e1 > 400 && e2 - e1 < 700;
+        printf("line page elapsed          %ld -> %ld ms: %s\n", e1, e2, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+        printf("line page view             %.100s\n", v2);
+    }
+    rs += run(1.5);
     midi(0x80, 48, 0);
-    printf("speak line rms %.4f        ", rs);
+    printf("speak line rms %.4f        ", rs / 3);
     status("");
     midi(0x90, 50, 110);
     for (int i = 0; i <= 10; ++i) {
@@ -181,7 +187,7 @@ int main(int argc, char **argv) {
     run(0.5);
 
     /* a body sweep: twenty knob writes, one airway rebuild once the knob rests */
-    api->set_param(inst, "mode", "0");
+    api->set_param(inst, "mode", "Sing");
     run(0.3);
     status("before body sweep");
     for (int i = 0; i <= 20; ++i) {
@@ -205,15 +211,72 @@ int main(int argc, char **argv) {
     printf("state                      %d bytes\n", n);
     api->set_param(inst, "state", buf);
 
-    /* a saved mouth survives a reload: pick a vowel, move the jaw and the swing, save, and
-     * restore into a fresh instance (the vowel's posture must not overwrite the saved knobs) */
+    /* Sing's Position: the next syllable, live; a key moves it on */
+    {
+        api->set_param(inst, "mode", "Sing");
+        api->set_param(inst, "lyrics", "one two three four five six");
+        run(0.2);
+        api->set_param(inst, "position", "3");
+        char p1[32], p2[32], pe[32], v[4096];
+        api->get_param(inst, "position", p1, sizeof p1);
+        midi(0x90, 60, 100);
+        run(0.3);
+        midi(0x80, 60, 0);
+        run(0.3);
+        api->get_param(inst, "position:effective", pe, sizeof pe);
+        api->get_param(inst, "position", p2, sizeof p2);
+        api->get_param(inst, "chm_view", v, sizeof v);
+        int ok = atoi(p1) == 3 && atoi(p2) == 4 && atoi(pe) == 4 && !strncmp(v, "S|one two", 9);
+        printf("position                   %s -> %s (%s), view %.30s: %s\n", p1, p2, pe, v, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+    }
+
+    /* Vowel: the Vowel knob moves the mouth knobs; pad pressure pushes it (live) and the
+     * knobs stay; velocity sets the breath */
+    {
+        api->set_param(inst, "mode", "Vowel");
+        api->set_param(inst, "sweep", "0");
+        run(0.3);
+        char rd[32], j0[32];
+        api->get_param(inst, "round", rd, sizeof rd);
+        api->get_param(inst, "jaw", j0, sizeof j0);
+        api->set_param(inst, "press_amt", "1");
+        midi(0x90, 57, 100);
+        double rp0 = run(0.5);
+        char e0[32], e1[32], e2[32], j1[32];
+        api->get_param(inst, "sweep:effective", e0, sizeof e0);
+        midi(0xA0, 57, 127);
+        double rp1 = run(0.5);
+        api->get_param(inst, "sweep:effective", e1, sizeof e1);
+        api->get_param(inst, "jaw", j1, sizeof j1);
+        midi(0x80, 57, 0);
+        run(0.4);
+        api->get_param(inst, "sweep:effective", e2, sizeof e2);
+        int ok = atof(rd) > 0.8 && atof(e0) == 0 && atof(e1) > 0.99 && atof(e2) == 0 && !strcmp(j0, j1);
+        printf("vowel knob + pressure      round %s, effective %s -> %s -> %s, jaw %s -> %s: %s\n", rd, e0, e1, e2, j0, j1, ok ? "ok" : "FAIL");
+        printf("  rms unpressed %.4f pressed %.4f\n", rp0, rp1);
+        if (!ok) failures++;
+        midi(0x90, 57, 25);
+        double soft = run(0.6);
+        midi(0x80, 57, 0);
+        run(0.6);
+        midi(0x90, 57, 127);
+        double hard = run(0.6);
+        midi(0x80, 57, 0);
+        run(0.6);
+        ok = hard > soft * 1.3;
+        printf("vowel velocity             soft %.4f hard %.4f: %s\n", soft, hard, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+        api->set_param(inst, "sweep", "0.25");
+        run(0.2);
+    }
+
+    /* a saved mouth survives a reload: pick a vowel, move the jaw, save, and restore into a
+     * fresh instance (neither the vowel's posture nor the Vowel knob's may overwrite the knobs) */
     api->set_param(inst, "mode", "Vowel");
     api->set_param(inst, "vowel", "9");
     run(0.3);
     api->set_param(inst, "jaw", "0.9100");
-    api->set_param(inst, "pattern", "3");
-    run(0.1);
-    api->set_param(inst, "swing", "0.4700");
     run(0.2);
     n = api->get_param(inst, "state", buf, sizeof buf);
     void *inst2 = api->create_instance(argv[1], "{}");
@@ -224,10 +287,10 @@ int main(int argc, char **argv) {
         run(1.5);
         char jaw[32], sw[32], vw[32];
         api->get_param(inst2, "jaw", jaw, sizeof jaw);
-        api->get_param(inst2, "swing", sw, sizeof sw);
+        api->get_param(inst2, "sweep", sw, sizeof sw);
         api->get_param(inst2, "vowel", vw, sizeof vw);
-        int ok = fabs(atof(jaw) - 0.91) < 1e-3 && fabs(atof(sw) - 0.47) < 1e-3 && atoi(vw) == 9;
-        printf("restore keeps knobs        jaw %s swing %s vowel %s: %s\n", jaw, sw, vw, ok ? "ok" : "FAIL");
+        int ok = fabs(atof(jaw) - 0.91) < 1e-3 && fabs(atof(sw) - 0.25) < 1e-3 && atoi(vw) == 9;
+        printf("restore keeps knobs        jaw %s vowel knob %s vowel %s: %s\n", jaw, sw, vw, ok ? "ok" : "FAIL");
         if (!ok) failures++;
         api->destroy_instance(inst2);
         inst = keep;
@@ -243,13 +306,23 @@ int main(int argc, char **argv) {
         int ok = atoi(m) == 2 && fabs(atof(jaw) - 0.25) < 1e-3;
         printf("v1 state migrates          mode %s jaw %s: %s\n", m, jaw, ok ? "ok" : "FAIL");
         if (!ok) failures++;
+        /* v2: Sing 0, Speak 1, Beatbox 3 (not in this module: back as Sing) */
+        api->set_param(inst3, "state", "{\"v\":2,\"preset\":0,\"lyrics\":\"ah\",\"p\":{\"mode\":1}}");
+        api->get_param(inst3, "mode", m, sizeof m);
+        ok = atoi(m) == 0;
+        api->set_param(inst3, "state", "{\"v\":2,\"preset\":0,\"lyrics\":\"ah\",\"p\":{\"mode\":3}}");
+        char m3[32];
+        api->get_param(inst3, "mode", m3, sizeof m3);
+        ok = ok && atoi(m3) == 1;
+        printf("v2 state migrates          Speak -> %s, Beatbox -> %s: %s\n", m, m3, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
         api->get_param(inst, "state", buf, sizeof buf);
         api->set_param(inst3, "state", buf);
         api->get_param(inst3, "mode", m, sizeof m);
         char m0[32];
         api->get_param(inst, "mode", m0, sizeof m0);
         ok = !strcmp(m, m0);
-        printf("v2 state keeps the mode    %s -> %s: %s\n", m0, m, ok ? "ok" : "FAIL");
+        printf("v3 state keeps the mode    %s -> %s: %s\n", m0, m, ok ? "ok" : "FAIL");
         if (!ok) failures++;
         api->destroy_instance(inst3);
     }
@@ -262,7 +335,7 @@ int main(int argc, char **argv) {
         fputs("{\"engine\":\"full\",\"buffer\":\"normal\"}\n", cf);
         fclose(cf);
     }
-    api->set_param(inst, "mode", "0");
+    api->set_param(inst, "mode", "Sing");
     run(2.5);
     status("after engine=full");
     midi(0x90, 60, 100);
