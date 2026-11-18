@@ -10,6 +10,8 @@
 //! - Sing: the next syllable of the lyrics at the key's pitch. A key pressed while another is
 //!   down sings legato; letting go of the sounding key while another is held glides back to it.
 //!   Velocity sets the breath. (A port of the app's `src/ui/singing.ts`.)
+//! - Speak: the key speaks the whole line (the lyrics) at its pitch; a key pressed while the
+//!   line is spoken starts it again. Planned on a thread of its own (see `speak`).
 //! - Vowel: the key sets the pitch and opens the breath; the mouth is the Mouth/Throat pages.
 //! - Beatbox: the key's pitch class picks a sound (see `BEAT_KEYS`); the pattern follows Move's
 //!   transport.
@@ -19,6 +21,7 @@
 mod mic;
 mod params_gen;
 pub mod sing;
+pub mod speak;
 
 use chimera::anatomy::human::{ArticKey, ArticPatch, BodyMix};
 use chimera::creatures::creature_by_id;
@@ -32,13 +35,13 @@ use chimera::voice::human_voice::SourcePatch;
 pub use params_gen::*;
 use std::ffi::{CStr, c_char};
 use std::io::Read;
-
-pub const MODE_SING: usize = 0;
-pub const MODE_VOWEL: usize = 1;
-pub const MODE_BEAT: usize = 2;
+use std::sync::Arc;
 
 /// Beatbox: a key's pitch class -> sound. A, A# and B hum a bass note at the key's own pitch.
 pub const BEAT_KEYS: [&str; 12] = ["B", "P!", "Pf", "K", "t", "tss", "!", "^K", "kch", "m", "m", "m"];
+
+/// Speak's make-up gain: a spoken line's level (rms) to a sung note's
+const SPEAK_GAIN: f64 = 1.9;
 
 /// Bodies are rebuilt (a new airway, several ms of work) only once the knobs have rested this long.
 const BODY_SETTLE_S: f64 = 0.12;
@@ -46,9 +49,12 @@ const BODY_SETTLE_S: f64 = 0.12;
 pub struct Chimera {
     fs: f64,
     eng: Engine,
-    g2p: EnglishG2P,
+    g2p: Arc<EnglishG2P>,
     p: [f64; N_PARAMS],
+    /// the lyrics as typed (Sing's syllables and Speak's line both come from them)
+    lyrics: String,
     sing: sing::Singer,
+    speak: speak::Speaker,
     /// keys down in Vowel / creature modes, oldest first
     held: Vec<u8>,
     /// the body the engine has, and how long the knobs have rested on a different one
@@ -106,12 +112,17 @@ impl Chimera {
                 g2p.load_dict(&text);
             }
         }
+        let g2p = Arc::new(g2p);
+        let lyrics = params_gen_default_lyrics().to_string();
+        let speak = speak::Speaker::new(g2p.clone(), speak::LineKey { text: lyrics.clone(), body: BodyMix::MALE, rate: DEFAULTS[P_RATE], expression: DEFAULTS[P_EXPRESSION] });
         let mut c = Chimera {
             fs,
             eng: Engine::with_light(fs, light),
             g2p,
             p: DEFAULTS,
+            lyrics,
             sing: sing::Singer::default(),
+            speak,
             held: Vec::with_capacity(16),
             body: BodyMix::MALE,
             body_rest: 0.0,
@@ -136,7 +147,7 @@ impl Chimera {
 
     fn creature_slot(&self) -> Option<usize> {
         let m = self.mode();
-        (3..=6).contains(&m).then(|| m - 3)
+        (MODE_FIRST_CREATURE..MODE_FIRST_CREATURE + 4).contains(&m).then(|| m - MODE_FIRST_CREATURE)
     }
 
     fn body_mix(&self) -> BodyMix {
@@ -163,7 +174,7 @@ impl Chimera {
         match DRIVES[id] {
             Drive::Source(s) => self.eng.set_source(&source_patch(s, v)),
             Drive::Artic(k, lo, hi) => {
-                if self.mode() != MODE_BEAT {
+                if self.mode() != MODE_BEATBOX {
                     let mut a = ArticPatch::default();
                     a.set(ArticKey::ALL[k], lo + v * (hi - lo));
                     self.eng.set_artic(&a, Some(true));
@@ -189,6 +200,7 @@ impl Chimera {
                 P_SWING => self.eng.set_beat_tempo(None, Some(v)),
                 P_MODE if !all => self.enter_mode(v as usize),
                 P_MIC => self.mic.reset(),
+                P_RATE | P_EXPRESSION => self.want_line(),
                 _ => {}
             },
         }
@@ -201,6 +213,7 @@ impl Chimera {
             return;
         }
         self.sing.stop(&mut self.eng);
+        self.speak.cut(&mut self.eng);
         self.held.clear();
         self.eng = Engine::with_light(self.fs, light);
         self.beat_synced = false;
@@ -233,7 +246,28 @@ impl Chimera {
     }
 
     pub fn set_lyrics(&mut self, text: &str) {
+        self.lyrics = text.to_string();
         self.sing.set_lyrics(text, &self.g2p);
+        self.want_line();
+    }
+
+    /// Speak's line for the lyrics, body, Rate and Expression now; planned only in Speak mode
+    /// (entering it asks again).
+    fn want_line(&mut self) {
+        if self.mode() != MODE_SPEAK {
+            return;
+        }
+        self.speak.want(speak::LineKey { text: self.lyrics.clone(), body: self.body, rate: self.p[P_RATE], expression: self.p[P_EXPRESSION] });
+    }
+
+    /// Speak: true while the line for the current settings is being planned (for tests).
+    pub fn speak_planning(&self) -> bool {
+        self.speak.planning()
+    }
+
+    /// Speak: true while a line is being spoken.
+    pub fn speaking(&self) -> bool {
+        self.speak.speaking()
     }
 
     fn update_vibrato(&mut self) {
@@ -245,7 +279,7 @@ impl Chimera {
     fn hold_on(&self) -> bool {
         match self.mode() {
             MODE_VOWEL => self.p[P_HOLD] > 0.5,
-            m if m >= 3 => self.p[CREATURE_KEYS[m - 3].1] > 0.5,
+            m if m >= MODE_FIRST_CREATURE => self.p[CREATURE_KEYS[m - MODE_FIRST_CREATURE].1] > 0.5,
             _ => false,
         }
     }
@@ -255,7 +289,7 @@ impl Chimera {
     fn update_gate(&mut self) {
         let keys_breathe = match self.mode() {
             MODE_VOWEL => true,
-            m if m >= 3 => self.p[CREATURE_KEYS[m - 3].0] < 0.5,
+            m if m >= MODE_FIRST_CREATURE => self.p[CREATURE_KEYS[m - MODE_FIRST_CREATURE].0] < 0.5,
             _ => false,
         };
         let on = self.hold_on() || (keys_breathe && !self.held.is_empty());
@@ -264,16 +298,17 @@ impl Chimera {
 
     fn leave_mode(&mut self, m: usize) {
         self.sing.stop(&mut self.eng);
+        self.speak.cut(&mut self.eng);
         self.held.clear();
         self.eng.set_gate(0.0);
-        if m == MODE_BEAT {
+        if m == MODE_BEATBOX {
             self.eng.set_beat_playing(false);
             self.beat_synced = false;
         }
     }
 
     fn enter_mode(&mut self, m: usize) {
-        if let Some(slot) = (3..=6).contains(&m).then(|| m - 3) {
+        if let Some(slot) = (MODE_FIRST_CREATURE..MODE_FIRST_CREATURE + 4).contains(&m).then(|| m - MODE_FIRST_CREATURE) {
             let def = creature_by_id(CREATURE_IDS[slot]);
             let initial: Vec<(usize, f64)> = match def {
                 Some(d) => (0..N_PARAMS)
@@ -287,7 +322,7 @@ impl Chimera {
             self.eng.set_creature(def, &initial);
         } else {
             self.eng.set_creature(None, &[]);
-            if m == MODE_BEAT {
+            if m == MODE_BEATBOX {
                 // a beatboxer waits with the jaw nearly closed; the sounds bring their own breath
                 self.eng.set_artic(&beat_ready(self.body), Some(true));
                 self.set_pattern(self.p[P_PATTERN] as usize, false);
@@ -302,6 +337,7 @@ impl Chimera {
         }
         self.update_vibrato();
         self.update_gate();
+        self.want_line();
     }
 
     /// The player picked a vowel: the mouth moves to its calibrated posture and the mouth knobs
@@ -335,7 +371,7 @@ impl Chimera {
                 self.published.push((id, v));
             }
         }
-        if self.mode() != MODE_BEAT {
+        if self.mode() != MODE_BEATBOX {
             self.eng.set_artic(&patch, Some(true));
         }
     }
@@ -359,7 +395,7 @@ impl Chimera {
 
     /// The host transport at this engine's clock (`beat` < 0: stopped).
     pub fn transport(&mut self, beat: f64, bpm: f64) {
-        let wants = self.mode() == MODE_BEAT && self.p[P_PATTERN] >= 1.0 && beat >= 0.0 && bpm > 0.0;
+        let wants = self.mode() == MODE_BEATBOX && self.p[P_PATTERN] >= 1.0 && beat >= 0.0 && bpm > 0.0;
         if !wants {
             if self.beat_synced {
                 self.eng.set_beat_playing(false);
@@ -391,7 +427,8 @@ impl Chimera {
         let midi = note as f64;
         match self.mode() {
             MODE_SING => self.sing.note_on(&mut self.eng, note, velocity, self.body, self.p[P_VIBRATO]),
-            MODE_BEAT => {
+            MODE_SPEAK => self.speak.note_on(&mut self.eng, note, velocity),
+            MODE_BEATBOX => {
                 let id = BEAT_KEYS[note as usize % 12];
                 let mut step = BeatStep::new(id);
                 if id == "m" {
@@ -437,7 +474,8 @@ impl Chimera {
     pub fn note_off(&mut self, note: u8) {
         match self.mode() {
             MODE_SING => self.sing.note_off(&mut self.eng, note, self.body, self.p[P_VIBRATO]),
-            MODE_BEAT => {}
+            // a spoken line plays out
+            MODE_SPEAK | MODE_BEATBOX => {}
             _ => {
                 self.held.retain(|&k| k != note);
                 // fall back to the most recent key still held (legato)
@@ -457,6 +495,7 @@ impl Chimera {
 
     pub fn all_notes_off(&mut self) {
         self.sing.stop(&mut self.eng);
+        self.speak.cut(&mut self.eng);
         self.held.clear();
         self.update_gate();
     }
@@ -469,17 +508,21 @@ impl Chimera {
             if self.body_rest >= BODY_SETTLE_S {
                 self.body = self.body_mix();
                 self.sing.stop(&mut self.eng);
+                self.speak.cut(&mut self.eng);
                 self.eng.set_body(self.body);
+                self.want_line();
                 self.update_vibrato();
                 self.update_gate();
-                if self.mode() == MODE_BEAT {
+                if self.mode() == MODE_BEATBOX {
                     self.eng.set_artic(&beat_ready(self.body), Some(true));
                 }
             }
         }
+        self.speak.tick(&mut self.eng, out.len() as f64 / self.fs);
         self.eng.render(out);
-        let g = self.gain as f64;
-        let mic = self.mode() == MODE_BEAT && self.p[P_MIC] > 0.5;
+        // speech sits ~6 dB under a sung note at the same breath: brought up to match
+        let g = self.gain as f64 * if self.mode() == MODE_SPEAK { SPEAK_GAIN } else { 1.0 };
+        let mic = self.mode() == MODE_BEATBOX && self.p[P_MIC] > 0.5;
         for s in out.iter_mut() {
             let mut x = *s as f64;
             if mic {

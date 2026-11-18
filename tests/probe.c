@@ -126,12 +126,11 @@ int main(int argc, char **argv) {
     worst_call = 0;
 
     const int notes[4] = {60, 62, 64, 67};
-    for (int mode = 0; mode < 7; ++mode) {
-        char v[8];
-        snprintf(v, sizeof v, "%d", mode);
-        api->set_param(inst, "mode", v);
+    static const char *const modes[] = {"Sing", "Speak", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"};
+    for (int mode = 0; mode < 8; ++mode) {
+        api->set_param(inst, "mode", modes[mode]);
         run(0.3);
-        if (mode == 2) {
+        if (!strcmp(modes[mode], "Beatbox")) {
             g_beat = 0.0;
             double r = run(2.4);
             printf("mode %d pattern rms %.4f    ", mode, r);
@@ -149,6 +148,38 @@ int main(int argc, char **argv) {
         printf("mode %d notes rms %.4f      ", mode, acc / 4);
         status("");
     }
+    /* Speak: a whole line, then the line re-planned while it is spoken (Rate swept, new
+     * lyrics typed, a body change): the planner thread must never hold the render thread up */
+    api->set_param(inst, "mode", "Speak");
+    run(0.3);
+    midi(0x90, 48, 100);
+    double rs = run(3.0);
+    midi(0x80, 48, 0);
+    printf("speak line rms %.4f        ", rs);
+    status("");
+    midi(0x90, 50, 110);
+    for (int i = 0; i <= 10; ++i) {
+        char v[16];
+        snprintf(v, sizeof v, "%.2f", 0.5 + i * 0.15);
+        api->set_param(inst, "rate", v);
+        run(0.1);
+    }
+    midi(0x80, 50, 0);
+    api->set_param(inst, "female", "1"); /* a body change cuts the line (a new airway): before the key */
+    run(0.3);
+    api->set_param(inst, "lyrics", "Four score and seven years ago our fathers brought forth on this continent a new nation, "
+                                    "conceived in liberty, and dedicated to the proposition that all men are created equal.");
+    midi(0x90, 52, 100);
+    run(0.05);
+    midi(0x80, 52, 0);
+    double rl = run(4.0);
+    printf("speak replans rms %.4f     ", rl);
+    status("");
+    api->set_param(inst, "female", "0");
+    api->set_param(inst, "rate", "1");
+    api->set_param(inst, "preset", "0");
+    run(0.5);
+
     /* a body sweep: twenty knob writes, one airway rebuild once the knob rests */
     api->set_param(inst, "mode", "0");
     run(0.3);
@@ -176,7 +207,7 @@ int main(int argc, char **argv) {
 
     /* a saved mouth survives a reload: pick a vowel, move the jaw and the swing, save, and
      * restore into a fresh instance (the vowel's posture must not overwrite the saved knobs) */
-    api->set_param(inst, "mode", "1");
+    api->set_param(inst, "mode", "Vowel");
     api->set_param(inst, "vowel", "9");
     run(0.3);
     api->set_param(inst, "jaw", "0.9100");
@@ -200,6 +231,27 @@ int main(int argc, char **argv) {
         if (!ok) failures++;
         api->destroy_instance(inst2);
         inst = keep;
+    }
+
+    /* a state saved before Speak (v1): Vowel was mode 1, and must come back as Vowel */
+    {
+        void *inst3 = api->create_instance(argv[1], "{}");
+        api->set_param(inst3, "state", "{\"v\":1,\"preset\":0,\"lyrics\":\"ah\",\"p\":{\"mode\":1,\"jaw\":0.25}}");
+        char m[32], jaw[32];
+        api->get_param(inst3, "mode", m, sizeof m);
+        api->get_param(inst3, "jaw", jaw, sizeof jaw);
+        int ok = atoi(m) == 2 && fabs(atof(jaw) - 0.25) < 1e-3;
+        printf("v1 state migrates          mode %s jaw %s: %s\n", m, jaw, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+        api->get_param(inst, "state", buf, sizeof buf);
+        api->set_param(inst3, "state", buf);
+        api->get_param(inst3, "mode", m, sizeof m);
+        char m0[32];
+        api->get_param(inst, "mode", m0, sizeof m0);
+        ok = !strcmp(m, m0);
+        printf("v2 state keeps the mode    %s -> %s: %s\n", m0, m, ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+        api->destroy_instance(inst3);
     }
 
     /* the Full engine, through the module's settings file (probe runs on a copy of the module) */

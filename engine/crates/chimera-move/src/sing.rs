@@ -53,7 +53,7 @@ fn ah() -> Syllable {
 }
 
 /// breath level for a key velocity (1 at 96, the app's on-screen keys)
-fn breath_for(velocity: u8) -> f64 {
+pub(crate) fn breath_for(velocity: u8) -> f64 {
     let v = velocity as f64;
     0.62 + 0.4 * (v / 96.0).clamp(0.0, 1.0) + 0.12 * ((v - 96.0) / 31.0).max(0.0)
 }

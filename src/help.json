@@ -38,6 +38,27 @@
       ]
     },
     {
+      "title": "Speak",
+      "lines": [
+        "A key speaks the",
+        "whole of the lyrics",
+        "at its pitch, with",
+        "the rise and fall",
+        "of speech: a ? ends",
+        "high, a . falls.",
+        "",
+        "A new key starts",
+        "the line again;",
+        "letting go does",
+        "not stop it.",
+        "Velocity: breath.",
+        "",
+        "Rate: how fast.",
+        "Expr: how much the",
+        "pitch moves."
+      ]
+    },
+    {
       "title": "Vowel",
       "lines": [
         "Keys set pitch and",

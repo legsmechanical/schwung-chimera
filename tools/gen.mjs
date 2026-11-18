@@ -35,11 +35,32 @@ P.params.forEach((p, i) => {
   byKey.set(p.key, { ...p, id: i });
 });
 const keyOf = (e) => (typeof e === "string" ? e : e.key);
+// gates name modes; the host compares numbers, so a name becomes its index here
+if (JSON.stringify(byKey.get("mode").options) !== JSON.stringify(P.modes)) fail("mode options must be the modes");
+const modeIndex = (v) => {
+  if (typeof v === "number") fail(`a gate on mode ${v}: name the mode`);
+  const i = P.modes.indexOf(v);
+  if (i < 0) fail(`a gate on an unknown mode ${v}`);
+  return i;
+};
+const resolve = (c) => {
+  if (!c) return c;
+  const r = { ...c };
+  if (r.equals !== undefined) r.equals = modeIndex(r.equals);
+  if (r.not_equals !== undefined) r.not_equals = modeIndex(r.not_equals);
+  if (r.lt !== undefined) r.lt = modeIndex(r.lt);
+  return r;
+};
+for (const pg of P.pages) {
+  pg.visible_if = resolve(pg.visible_if);
+  pg.keys = pg.keys.map((e) => (typeof e === "string" ? e : { ...e, visible_if: resolve(e.visible_if) }));
+}
 // a gate on `mode`, evaluated as the planner does (hidden entries leave the knob mapping)
 const shows = (c, m) => {
   if (!c) return true;
   if (c.param !== "mode") fail(`a gate on ${c.param}: pages gate on mode only`);
   if (c.equals !== undefined) return m === c.equals;
+  if (c.not_equals !== undefined) return m !== c.not_equals;
   if (c.lt !== undefined) return m < c.lt;
   fail(`unsupported gate ${JSON.stringify(c)}`);
 };
@@ -171,6 +192,7 @@ for (const p of P.params) {
   h += `    {${cs(p.key)}, ${TYPE[p.type]}, ${num(min)}f, ${num(max)}f, ${num(def)}f, ${isEnum ? p.options.length : 0}, ${isEnum ? `cp_opts_${p.key}` : "NULL"}, ${p.access === "write" ? 1 : 0}},\n`;
 }
 h += `};\n\n`;
+P.modes.forEach((m, i) => (h += `#define CP_MODE_${m.toUpperCase()} ${i}\n`));
 h += `#define CP_LYRICS_DEFAULT ${cs(byKey.get("lyrics").default)}\n`;
 h += `/* the lyrics a Words option stands for (NULL: Custom, keep the typed lyrics) */\n`;
 h += `static const char *const cp_words_text[] = {${byKey.get("words").options.map((o) => (o === "Custom" ? "NULL" : cs(words[o]))).join(", ")}};\n\n`;
@@ -204,8 +226,8 @@ for (const p of P.params) {
     if (ai < 0) fail(`${p.key}: unknown articulator ${p.artic[0]}`);
     d = `Drive::Artic(${ai}, ${num(p.artic[1])}, ${num(p.artic[2])})`;
   } else if (p.creature) {
-    const mode = { songbird: 3, seal: 4, alligator: 5, elephant: 6 }[p.creature[0]];
-    if (mode === undefined) fail(`${p.key}: unknown creature ${p.creature[0]}`);
+    const mode = P.modes.indexOf({ songbird: "Songbird", seal: "Seal", alligator: "Gator", elephant: "Elephant" }[p.creature[0]]);
+    if (mode < 0) fail(`${p.key}: unknown creature ${p.creature[0]}`);
     d = `Drive::Creature(${mode}, ${cs(p.creature[0])}, ${cs(p.creature[1])})`;
   }
   r += `    ${d}, // ${p.key}\n`;
@@ -214,7 +236,12 @@ r += `];\n\n`;
 const vowel = byKey.get("vowel");
 if (vowel.ipa.length !== vowel.options.length) fail("vowel ipa length");
 r += `pub const VOWEL_IPA: [&str; ${vowel.ipa.length}] = [${vowel.ipa.map(cs).join(", ")}];\n`;
-r += `/// per creature mode (3..=6): the Keys and Hold param ids\n`;
+const modeConst = (m) => "MODE_" + m.toUpperCase();
+P.modes.forEach((m, i) => (r += `pub const ${modeConst(m)}: usize = ${i};\n`));
+const firstCreature = P.modes.indexOf("Songbird");
+if (JSON.stringify(P.modes.slice(firstCreature)) !== JSON.stringify(["Songbird", "Seal", "Gator", "Elephant"])) fail("the creatures are the last four modes, in CREATURE_IDS order");
+r += `/// the creatures are the last four modes, in CREATURE_IDS order\npub const MODE_FIRST_CREATURE: usize = ${firstCreature};\n`;
+r += `/// per creature mode (MODE_FIRST_CREATURE..): the Keys and Hold param ids\n`;
 r += `pub const CREATURE_KEYS: [(usize, usize); 4] = [(P_SB_KEYS, P_SB_HOLD), (P_SE_KEYS, P_SE_HOLD), (P_GA_KEYS, P_GA_HOLD), (P_EL_KEYS, P_EL_HOLD)];\n`;
 r += `pub const CREATURE_IDS: [&str; 4] = ["songbird", "seal", "alligator", "elephant"];\n`;
 writeFileSync(join(repo, "engine/crates/chimera-move/src/params_gen.rs"), r);

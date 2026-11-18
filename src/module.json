@@ -2,8 +2,8 @@
  "id": "chimera",
  "name": "CHIMERA",
  "abbrev": "CHIMR",
- "version": "0.2.0",
- "description": "A physically modeled voice: every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not samples. Sing typed lyrics a syllable per key, shape vowels by hand, beatbox on the pads, or play a songbird, seal, alligator or elephant. Port of jamesondh's CHIMERA engine, lightened to run on the Move.",
+ "version": "0.3.0",
+ "description": "A physically modeled voice: every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not samples. Sing typed lyrics a syllable per key, speak them, shape vowels by hand, beatbox on the pads, or play a songbird, seal, alligator or elephant. Port of jamesondh's CHIMERA engine, lightened to run on the Move.",
  "author": "legsmechanical (engine: Jameson Hodge / CHIMERA)",
  "license": "MIT",
  "ui": "ui.js",
@@ -19,7 +19,7 @@
   "chainable": true,
   "component_type": "sound_generator",
   "chain_params": [
-  {"key":"mode","name":"Mode","type":"enum","options":["Sing","Vowel","Beatbox","Songbird","Seal","Gator","Elephant"],"default":0},
+  {"key":"mode","name":"Mode","type":"enum","options":["Sing","Speak","Vowel","Beatbox","Songbird","Seal","Gator","Elephant"],"default":0},
   {"key":"words","name":"Words","type":"enum","options":["Custom","Made of Air","Twinkle","Daisy Bell","Hello","Ah","Ooh","La","Doo"],"default":1},
   {"key":"restart","name":"Restart","type":"enum","options":["-","Go"],"default":0},
   {"key":"pattern","name":"Pattern","type":"enum","options":["Off","Boots & Cats","Four Floor","Breakbeat","Rim Shuffle","Inward","Clicks","Hum Bass"],"default":1},
@@ -90,7 +90,9 @@
   {"key":"el_trunk","name":"Trunk","type":"float","min":0,"max":1,"default":1},
   {"key":"el_chaos","name":"Chaos","type":"float","min":0,"max":1,"default":0.2},
   {"key":"el_pitch","name":"Pitch","type":"float","min":8,"max":45,"default":14},
-  {"key":"mic","name":"Close Mic","type":"enum","options":["Off","On"],"default":1}
+  {"key":"mic","name":"Close Mic","type":"enum","options":["Off","On"],"default":1},
+  {"key":"rate","name":"Rate","type":"float","min":0.5,"max":2,"default":1},
+  {"key":"expression","name":"Expression","type":"float","min":0,"max":1,"default":0.35}
   ]
  }
 }

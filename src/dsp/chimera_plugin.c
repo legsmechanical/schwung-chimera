@@ -56,7 +56,7 @@
 #include "params_gen.h"
 
 #define EXPORT __attribute__((visibility("default")))
-#define BUILD_ID "chimera 0.2.0"
+#define BUILD_ID "chimera 0.3.0"
 
 /* ---- the Rust side (engine/crates/chimera-move) */
 typedef struct Handle Handle;
@@ -86,7 +86,6 @@ static const host_api_v1_t *g_host;
 #define LYR_MAX 512
 #define SYL_MAX 64
 #define DIRTY_WORDS ((CP_COUNT + 63) / 64)
-#define MODE_BEATBOX 2
 static const int kBufferBlocks[3] = {2, 4, 8}; /* Low / Normal / Safe: 5.8, 11.6, 23.2 ms */
 #define BUFFER_DEFAULT 1
 
@@ -538,7 +537,7 @@ static void apply_preset(inst_t *in, int idx) {
     pick(in, CMD_PICK_VOWEL, (int)pr->vals[CP_VOWEL]);
 }
 
-/* ---- state: {"v":1,"preset":N,"lyrics":"...","p":{"key":value,...}} */
+/* ---- state: {"v":2,"preset":N,"lyrics":"...","p":{"key":value,...}} */
 
 static int put(char *buf, int len, int n, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static int put(char *buf, int len, int n, const char *fmt, ...) {
@@ -564,7 +563,7 @@ static int put_json_str(char *buf, int len, int n, const char *s) {
 }
 
 static int build_state(inst_t *in, char *buf, int len) {
-    int n = put(buf, len, 0, "{\"v\":1,\"preset\":%d,\"lyrics\":", in->preset);
+    int n = put(buf, len, 0, "{\"v\":2,\"preset\":%d,\"lyrics\":", in->preset);
     n = put_json_str(buf, len, n, in->lyrics);
     n = put(buf, len, n, ",\"p\":{");
     int first = 1;
@@ -616,6 +615,9 @@ static void json_unescape(const char *p, char *out, int cap) {
 }
 
 static void restore_state(inst_t *in, const char *json) {
+    /* v1 (before 0.3.0) had no Speak: its modes from Vowel on are one lower */
+    const char *ver = json_find(json, "v");
+    const int v1 = !ver || strtol(ver, NULL, 10) < 2;
     const char *p = json_find(json, "preset");
     if (p) {
         long i = strtol(p, NULL, 10);
@@ -640,6 +642,7 @@ static void restore_state(inst_t *in, const char *json) {
         char *end;
         float f = strtof(v, &end);
         if (end == v || !isfinite(f)) continue;
+        if (id == CP_MODE && v1 && f >= CP_MODE_SPEAK) f += 1;
         store(in, id, fit(id, f));
     }
 }
@@ -776,7 +779,7 @@ static int get_param(void *instance, const char *key, char *buf, int len) {
     if (!in || !key || !buf || len <= 0) return -1;
     pub_drain(in);
     if (!strcmp(key, "ui_hierarchy"))
-        return outf(buf, len, "%s", (int)in->val[CP_MODE] == MODE_BEATBOX ? cp_ui_hierarchy_drums : cp_ui_hierarchy);
+        return outf(buf, len, "%s", (int)in->val[CP_MODE] == CP_MODE_BEATBOX ? cp_ui_hierarchy_drums : cp_ui_hierarchy);
     if (!strcmp(key, "chain_params")) return outf(buf, len, "%s", cp_chain_params);
     if (!strcmp(key, "name")) return outf(buf, len, "CHIMERA");
     if (!strcmp(key, "state")) return build_state(in, buf, len);

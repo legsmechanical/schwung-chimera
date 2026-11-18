@@ -10,13 +10,16 @@ One voice at a time. Pick a mode on the **Play** page:
 | Mode | What a key does |
 |---|---|
 | **Sing** | Sings the next syllable of the lyrics at its pitch. Hold a key while playing the next for legato; velocity sets the breath. **Words** picks built-in lyrics, **Lyrics** opens the keyboard to type your own, **Again** goes back to the first word. |
+| **Speak** | Speaks the whole of the lyrics at the key's pitch, with the rhythm and intonation of speech (a question ends high, a statement falls). A new key starts the line again; letting go does not stop it. Velocity sets the breath. **Rate** is how fast, **Expr** how much the pitch moves. Words and Lyrics are shared with Sing. |
 | **Vowel** | Sets the pitch and breathes. Shape the sound by hand on **Throat** and **Mouth**; **Vowel** jumps the mouth to a vowel and the knobs follow. **Hold** drones with no key down. |
 | **Beatbox** | Pads by note name: C kick, C# lip pop, D snare, D# rimshot, E hi-hat, F open hat, F# tongue click, G inward snare, G# crash, A to B hum a bass note. **Beat** plays a pattern in time with Move's transport. **Mic** is the close-mic sound (proximity bass, compression). |
 | **Songbird, Seal, Gator, Elephant** | **Keys: Pitch** plays the creature at the key's pitch while held; the other settings play one of its calls at the key's pitch. **Hold** keeps it breathing. |
 
 **Play** always starts Mode, Volume; then the mode's own controls (Hold and Keys for Vowel and
-the creatures). **Voice** (body: Female and Child blend continuously; breath, pressed, vibrato,
-glide) and **Tone** (bright, airy, rough, fry, whisper, drift) apply to Sing, Vowel and Beatbox.
+the creatures). **Voice** (body: Female and Child blend continuously; breath, pressed) and **Tone** (bright, airy,
+rough, fry, whisper, drift) apply to Sing, Speak, Vowel and Beatbox. **Pitch** shows only what
+works in the mode: vibrato in Sing and Vowel, glide in Vowel (sung and spoken notes set their own
+pitch movement).
 Every creature page starts Pitch, Breath. The first page is the preset browser; Schwung's own My
 Presets page saves your sounds.
 

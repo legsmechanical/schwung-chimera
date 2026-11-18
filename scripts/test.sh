@@ -8,4 +8,4 @@ PKGS="-p chimera-move"
 [ "$1" = "--engine" ] && PKGS="-p chimera-move -p chimera"
 docker run --rm -v "$REPO_ROOT:/build" -u "$(id -u):$(id -g)" -w /build/engine \
     -e CARGO_HOME=/build/build/cargo-home -e CARGO_TARGET_DIR=/build/build/cargo-native \
-    chimera-builder cargo test --release $PKGS -- --test-threads=1 --nocapture
+    -e CHIMERA_DEMO chimera-builder cargo test --release $PKGS -- --test-threads=1 --nocapture

@@ -1,8 +1,8 @@
 {
-  "_doc": "The ONE table of CHIMERA's parameters, pages and factory presets. tools/gen.mjs turns it into src/module.json (chain_params), src/dsp/params_gen.h (the plugin's table + ui_hierarchy) and engine/crates/chimera-move/src/params_gen.rs (ids). Edit here, then run the generator (scripts/build.sh does). Param order is the id order: append, never reorder (saved states use keys, but ids must match on both sides of the build). 'artic' = the engine articulator a normalized 0..1 knob maps onto, over [lo, hi]; 'source' = a voice-source field; 'creature' = [creature id, param key] for a creature's own parameter.",
-  "modes": ["Sing", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"],
+  "_doc": "The ONE table of CHIMERA's parameters, pages and factory presets. tools/gen.mjs turns it into src/module.json (chain_params), src/dsp/params_gen.h (the plugin's table + ui_hierarchy) and engine/crates/chimera-move/src/params_gen.rs (ids). Page gates name modes (equals: Speak, lt: Vowel); the generator turns them into indices. Edit here, then run the generator (scripts/build.sh does). Param order is the id order: append, never reorder (saved states use keys, but ids must match on both sides of the build). 'artic' = the engine articulator a normalized 0..1 knob maps onto, over [lo, hi]; 'source' = a voice-source field; 'creature' = [creature id, param key] for a creature's own parameter.",
+  "modes": ["Sing", "Speak", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"],
   "params": [
-    {"key": "mode", "name": "Mode", "type": "enum", "options": ["Sing", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"], "short_options": ["SNG", "VOW", "BBX", "BRD", "SEL", "GTR", "ELE"], "default": 0},
+    {"key": "mode", "name": "Mode", "type": "enum", "options": ["Sing", "Speak", "Vowel", "Beatbox", "Songbird", "Seal", "Gator", "Elephant"], "short_options": ["SNG", "SPK", "VOW", "BBX", "BRD", "SEL", "GTR", "ELE"], "default": 0},
     {"key": "words", "name": "Words", "type": "enum", "options": ["Custom", "Made of Air", "Twinkle", "Daisy Bell", "Hello", "Ah", "Ooh", "La", "Doo"], "short_options": ["OWN", "AIR", "TWN", "DSY", "HI", "AH", "OOH", "LA", "DOO"], "default": 1},
     {"key": "lyrics", "name": "Lyrics", "type": "string", "default": "Breathe in, breathe out, I am made of air. Tongue and lips and throat, singing anywhere."},
     {"key": "restart", "name": "Restart", "short": "Again", "type": "enum", "options": ["-", "Go"], "access": "write", "default": 0},
@@ -83,35 +83,44 @@
     {"key": "el_chaos", "name": "Chaos", "type": "float", "min": 0, "max": 1, "step": 0.01, "unit": "%", "default": 0.2, "creature": ["elephant", "chaos"]},
     {"key": "el_pitch", "name": "Pitch", "type": "float", "min": 8, "max": 45, "step": 0.1, "unit": "Hz", "default": 14, "creature": ["elephant", "pitch"]},
 
-    {"key": "mic", "name": "Close Mic", "short": "Mic", "type": "enum", "options": ["Off", "On"], "default": 1, "viz": {"kind": "switch"}}
+    {"key": "mic", "name": "Close Mic", "short": "Mic", "type": "enum", "options": ["Off", "On"], "default": 1, "viz": {"kind": "switch"}},
+
+    {"key": "rate", "name": "Rate", "type": "float", "min": 0.5, "max": 2, "step": 0.05, "unit": "x", "default": 1},
+    {"key": "expression", "name": "Expression", "short": "Expr", "type": "float", "min": 0, "max": 1, "step": 0.01, "unit": "%", "default": 0.35}
   ],
   "pages": [
     {"level": "play", "label": "Play", "keys": [
       "mode", "volume",
-      {"key": "hold", "visible_if": {"param": "mode", "equals": 1}},
-      {"key": "sb_hold", "visible_if": {"param": "mode", "equals": 3}},
-      {"key": "se_hold", "visible_if": {"param": "mode", "equals": 4}},
-      {"key": "ga_hold", "visible_if": {"param": "mode", "equals": 5}},
-      {"key": "el_hold", "visible_if": {"param": "mode", "equals": 6}},
-      {"key": "sb_keys", "visible_if": {"param": "mode", "equals": 3}},
-      {"key": "se_keys", "visible_if": {"param": "mode", "equals": 4}},
-      {"key": "ga_keys", "visible_if": {"param": "mode", "equals": 5}},
-      {"key": "el_keys", "visible_if": {"param": "mode", "equals": 6}},
-      {"key": "words", "visible_if": {"param": "mode", "equals": 0}},
-      {"key": "lyrics", "visible_if": {"param": "mode", "equals": 0}},
-      {"key": "restart", "visible_if": {"param": "mode", "equals": 0}},
-      {"key": "pattern", "visible_if": {"param": "mode", "equals": 2}},
-      {"key": "swing", "visible_if": {"param": "mode", "equals": 2}},
-      {"key": "mic", "visible_if": {"param": "mode", "equals": 2}}]},
-    {"level": "voice", "label": "Voice", "visible_if": {"param": "mode", "lt": 3}, "keys": ["female", "child", "breath", "pressed", "vibrato", "vib_rate", "glide"]},
-    {"level": "tone", "label": "Tone", "visible_if": {"param": "mode", "lt": 3}, "keys": ["bright", "breathy", "rough", "fry", "whisper", "drift"]},
-    {"level": "throat", "label": "Throat", "visible_if": {"param": "mode", "equals": 1}, "keys": ["larynx", "false_folds", "twang", "tongue_root", "nasal", "lateral"]},
-    {"level": "mouth", "label": "Mouth", "visible_if": {"param": "mode", "equals": 1}, "keys": ["vowel", "tongue_x", "tongue_y", "tip_curl", "jaw", "lips", "round", "protrude"]},
-    {"level": "songbird", "label": "Syrinx", "visible_if": {"param": "mode", "equals": 3}, "keys": ["sb_pitch", "sb_pressure", "sb_interval", "sb_lr", "sb_tension", "sb_drive", "sb_purity"]},
-    {"level": "beak", "label": "Beak", "visible_if": {"param": "mode", "equals": 3}, "keys": ["sb_throat", "sb_gape"]},
-    {"level": "seal", "label": "Seal", "visible_if": {"param": "mode", "equals": 4}, "keys": ["se_pitch", "se_pressure", "se_prate", "se_pdepth", "se_duty", "se_bright", "se_rough", "se_mouth"]},
-    {"level": "gator", "label": "Gator", "visible_if": {"param": "mode", "equals": 5}, "keys": ["ga_pitch", "ga_pressure", "ga_chaos", "ga_hiss", "ga_mouth", "ga_nostrils"]},
-    {"level": "elephant", "label": "Elephant", "visible_if": {"param": "mode", "equals": 6}, "keys": ["el_pitch", "el_pressure", "el_lip", "el_trumpet", "el_trunk", "el_chaos"]}
+      {"key": "hold", "visible_if": {"param": "mode", "equals": "Vowel"}},
+      {"key": "sb_hold", "visible_if": {"param": "mode", "equals": "Songbird"}},
+      {"key": "se_hold", "visible_if": {"param": "mode", "equals": "Seal"}},
+      {"key": "ga_hold", "visible_if": {"param": "mode", "equals": "Gator"}},
+      {"key": "el_hold", "visible_if": {"param": "mode", "equals": "Elephant"}},
+      {"key": "sb_keys", "visible_if": {"param": "mode", "equals": "Songbird"}},
+      {"key": "se_keys", "visible_if": {"param": "mode", "equals": "Seal"}},
+      {"key": "ga_keys", "visible_if": {"param": "mode", "equals": "Gator"}},
+      {"key": "el_keys", "visible_if": {"param": "mode", "equals": "Elephant"}},
+      {"key": "words", "visible_if": {"param": "mode", "lt": "Vowel"}},
+      {"key": "lyrics", "visible_if": {"param": "mode", "lt": "Vowel"}},
+      {"key": "restart", "visible_if": {"param": "mode", "equals": "Sing"}},
+      {"key": "rate", "visible_if": {"param": "mode", "equals": "Speak"}},
+      {"key": "expression", "visible_if": {"param": "mode", "equals": "Speak"}},
+      {"key": "pattern", "visible_if": {"param": "mode", "equals": "Beatbox"}},
+      {"key": "swing", "visible_if": {"param": "mode", "equals": "Beatbox"}},
+      {"key": "mic", "visible_if": {"param": "mode", "equals": "Beatbox"}}]},
+    {"level": "voice", "label": "Voice", "visible_if": {"param": "mode", "lt": "Songbird"}, "keys": ["female", "child", "breath", "pressed"]},
+    {"level": "pitch", "label": "Pitch", "visible_if": {"param": "mode", "lt": "Beatbox"}, "keys": [
+      {"key": "vibrato", "visible_if": {"param": "mode", "not_equals": "Speak"}},
+      {"key": "vib_rate", "visible_if": {"param": "mode", "not_equals": "Speak"}},
+      {"key": "glide", "visible_if": {"param": "mode", "equals": "Vowel"}}]},
+    {"level": "tone", "label": "Tone", "visible_if": {"param": "mode", "lt": "Songbird"}, "keys": ["bright", "breathy", "rough", "fry", "whisper", "drift"]},
+    {"level": "throat", "label": "Throat", "visible_if": {"param": "mode", "equals": "Vowel"}, "keys": ["larynx", "false_folds", "twang", "tongue_root", "nasal", "lateral"]},
+    {"level": "mouth", "label": "Mouth", "visible_if": {"param": "mode", "equals": "Vowel"}, "keys": ["vowel", "tongue_x", "tongue_y", "tip_curl", "jaw", "lips", "round", "protrude"]},
+    {"level": "songbird", "label": "Syrinx", "visible_if": {"param": "mode", "equals": "Songbird"}, "keys": ["sb_pitch", "sb_pressure", "sb_interval", "sb_lr", "sb_tension", "sb_drive", "sb_purity"]},
+    {"level": "beak", "label": "Beak", "visible_if": {"param": "mode", "equals": "Songbird"}, "keys": ["sb_throat", "sb_gape"]},
+    {"level": "seal", "label": "Seal", "visible_if": {"param": "mode", "equals": "Seal"}, "keys": ["se_pitch", "se_pressure", "se_prate", "se_pdepth", "se_duty", "se_bright", "se_rough", "se_mouth"]},
+    {"level": "gator", "label": "Gator", "visible_if": {"param": "mode", "equals": "Gator"}, "keys": ["ga_pitch", "ga_pressure", "ga_chaos", "ga_hiss", "ga_mouth", "ga_nostrils"]},
+    {"level": "elephant", "label": "Elephant", "visible_if": {"param": "mode", "equals": "Elephant"}, "keys": ["el_pitch", "el_pressure", "el_lip", "el_trumpet", "el_trunk", "el_chaos"]}
   ],
   "words": {
     "Made of Air": "Breathe in, breathe out, I am made of air. Tongue and lips and throat, singing anywhere.",
@@ -144,6 +153,9 @@
     {"name": "Gator Bellow", "values": {"mode": "Gator", "ga_keys": "Bellow"}},
     {"name": "Gator Sub", "values": {"mode": "Gator", "ga_hold": "Off", "ga_chaos": 0.4}},
     {"name": "Elephant Trumpet", "values": {"mode": "Elephant", "el_keys": "Trumpet"}},
-    {"name": "Elephant Rumble", "values": {"mode": "Elephant"}}
+    {"name": "Elephant Rumble", "values": {"mode": "Elephant"}},
+    {"name": "Spoken Word", "values": {"mode": "Speak", "words": "Made of Air"}},
+    {"name": "Quiet Voice", "values": {"mode": "Speak", "words": "Hello", "female": 1, "whisper": "On", "rate": 0.9}},
+    {"name": "Auctioneer", "values": {"mode": "Speak", "words": "Daisy Bell", "rate": 1.8, "expression": 0.6, "pressed": 0.7}}
   ]
 }

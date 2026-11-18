@@ -11,7 +11,7 @@
 | `engine/crates/chimera-move/` | The performer (keys → sung syllables, vowels, beatbox, creatures), the close-mic chain, a C ABI |
 | `engine/crates/chimera/` | The CHIMERA engine, vendored from upstream at `engine/UPSTREAM_COMMIT`, with the Move port's changes (`engine/move-port.patch` is the light path's first two commits) |
 | `tools/cells.mjs` | Plans every mode's pages with the Move's own `param_pages` code and prints each cell's label and widget |
-| `tests/probe.c` | Loads `dsp.so` on the Move outside the host, plays every mode at real-time pace, reports underruns |
+| `tests/probe.c` | Loads `dsp.so` on the Move outside the host, plays every mode at real-time pace (Speak re-planned while it speaks), checks state restores and the v1 migration, reports underruns |
 | `tests/device_check.py` | Loads the module into slot 0 of the live host through `schwung-testd` (refuses if slot 0 is in use or an overtake tool owns the pads) |
 
 `./scripts/test.sh` runs the performer's tests natively; `--engine` adds the whole engine suite,
@@ -44,6 +44,31 @@ Measured on a CM5 with the callback pinned to core 3 (`tests/probe.c`, run from 
 module): at most ~22 µs of callback CPU per block, zero underruns through every mode, a body sweep
 and a switch to Full through the settings file; a saved mouth and swing survive a restore into a
 fresh instance.
+
+## Speak
+
+A key speaks the whole line with the engine's speech planner (`speak.rs`): CMUdict G2P, Klatt
+durations, phrase intonation from the punctuation. Planning a sentence allocates and takes
+milliseconds, which the render thread cannot spend (it must stay `buffer` blocks ahead), so a
+planner thread of its own (SCHED_OTHER: threads inherit the render thread's FIFO policy, so it
+sets its own) plans the line whenever its text, the body, Rate or Expression changes, in Speak
+mode only. The render thread asks with a channel send and picks the result up between blocks,
+never waiting; a key pressed while its line is still being planned waits for it (up to 1 s). The
+thread is joined when the engine is dropped, before the library can be unloaded.
+
+- **Pitch**: the line is planned once at 100 Hz and every F0 target is scaled by key / 100: the
+  planner's intonation (declination, accents, final fall or rise) is proportional to its base, so
+  this is the line planned at the key's pitch, without planning per key.
+- **Feeding**: the planned gestures, sorted by when they start acting, go to the voice 250 ms
+  ahead of its clock, tagged with the line's tag. A new key releases that tag (gestures under way
+  ramp out, those not begun are dropped) and starts again; the score never holds a whole line.
+- A spoken line keeps its own plan (`Arc<[Gesture]>`): one planned meanwhile (Rate turned while
+  speaking) is for the next key, never mixed into the line being spoken.
+- Speech sits ~6 dB under a sung note at the same breath; Speak's output is brought up to match.
+- **Mode numbers**: Speak is mode 1, so every later mode moved up one. Saved states carry
+  `"v":2`; a v1 state's mode from Vowel on is moved up when it is restored. Page gates in
+  `params.json` name modes and `gen.mjs` resolves them, and the mode constants (C and Rust) are
+  generated, so a new mode never means renumbering by hand again.
 
 ## The light engine (what was traded)
 
@@ -84,6 +109,6 @@ when the transport jumps. A tempo outside 40-240 bpm is followed at half or doub
 
 ## Not ported
 
-- Speak (text to speech) and singing lyrics to a built-in tune: the keys sing instead.
+- Singing lyrics to a built-in tune: the keys sing instead.
 - The app's visuals (the head cutaway, spectra).
 - Korean and Russian lyrics work in the engine, but the Move's keyboard types ASCII.
