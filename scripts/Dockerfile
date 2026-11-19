@@ -6,7 +6,10 @@
 # targets glibc 2.17.
 FROM ubuntu:22.04
 
+# gcc + libc6-dev: the native compiler cargo's build scripts and the native tests link with. An
+# arm64 host gets it with the cross compiler; an x86 one (the release CI) does not.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    gcc libc6-dev \
     gcc-aarch64-linux-gnu \
     binutils-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
