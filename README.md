@@ -17,7 +17,7 @@ One voice at a time. Pick a mode with **Mode**:
 **Words** picks built-in lyrics and **Lyrics** opens the keyboard to type your own (Speak and Sing
 share them). The main page also carries Female and Child (the body, blended continuously) and
 Volume. **Tone** (breath, pressed, bright, airy, rough, fry, whisper, drift) applies to every mode;
-**Pitch** has vibrato rate (Sing, Vowel), glide (Vowel) and Legato (Sing). The first page is the preset browser;
+**Pitch** has vibrato depth and rate (Sing, Vowel), glide (Vowel) and Legato (Sing). The first page is the preset browser;
 Schwung's own My Presets page saves your sounds.
 
 Sets saved with CHIMERA 0.3 keep their mode; one saved in Beatbox or a creature mode comes back
