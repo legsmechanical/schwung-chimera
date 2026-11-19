@@ -1,5 +1,5 @@
 /*
- * CHIMERA Voice's drawn pages. Each is an `as_page` canvas with `page_first`, so it comes before
+ * Schimera's drawn pages. Each is an `as_page` canvas with `page_first`, so it comes before
  * its level's knob grid and carries the same knobs; the host draws the header, page bar and
  * footer.
  *

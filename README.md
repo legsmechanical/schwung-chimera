@@ -1,4 +1,4 @@
-# CHIMERA Voice for Move
+# Schimera for Move
 
 A physically modeled human voice for [Schwung](https://github.com/charlesvestal/schwung) on Ableton
 Move. Every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not
@@ -26,7 +26,7 @@ in Sing.
 ## CPU
 
 The engine runs on its own thread, off the audio callback. **Engine** and **Buffer** are the
-module's settings in Schwung Manager (`move.local:7700` → Modules → CHIMERA Voice), because they are the
+module's settings in Schwung Manager (`move.local:7700` → Modules → Schimera), because they are the
 device's CPU budget rather than part of a sound: a scene or an LFO cannot reach them, and a set
 saved on a CM5 with Full does not overload a CM4. **Engine**:
 
@@ -39,7 +39,9 @@ you hear dropouts. Both take effect within a second of saving, without reloading
 
 ## Install
 
-From a release: Schwung Manager → Install Custom Module → this repository's URL. Or build it:
+Needs Schwung 1.8.0 or newer. In Schwung Manager (`move.local:7700`), install **Schimera** from
+the module list (Sound Generators), or use Install Custom Module with this repository's URL. Or
+build it:
 
 ```bash
 ./scripts/build.sh      # needs Docker and node

@@ -1,6 +1,6 @@
 {
   "version": "0.2.0",
-  "name": "CHIMERA",
-  "description": "A physically modeled voice: every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not samples. Sing typed lyrics a syllable per key, shape vowels by hand, beatbox on the pads, or play a songbird, seal, alligator or elephant. Port of jamesondh's CHIMERA engine, lightened to run on the Move.",
+  "name": "Schimera",
+  "description": "A physically modeled human voice: every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not samples. Speak a line of text at a key's pitch, sing it a syllable per key, or play a held vowel and sweep it with pad pressure. Port of jamesondh's CHIMERA engine, lightened to run on the Move.",
   "download_url": "https://github.com/legsmechanical/schwung-chimera/releases/download/v0.2.0/chimera-module.tar.gz"
 }

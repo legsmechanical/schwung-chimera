@@ -1,5 +1,5 @@
 /*
- * CHIMERA UI for Schwung / Ableton Move
+ * Schimera UI for Schwung / Ableton Move
  *
  * The root screen (preset browsing + octave) comes from the shared sound_generator_ui base,
  * which also ends held notes on an octave change; every parameter page is declared by the
@@ -11,7 +11,7 @@
 import { createSoundGeneratorUI } from '/data/UserData/schwung/shared/sound_generator_ui.mjs';
 
 const ui = createSoundGeneratorUI({
-    moduleName: 'CHIMERA',
+    moduleName: 'Schimera',
     showPolyphony: false,
     showOctave: true,
 });

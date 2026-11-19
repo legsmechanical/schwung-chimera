@@ -1,5 +1,5 @@
 /*
- * CHIMERA Voice for Schwung / Ableton Move: plugin API v2 around the Rust engine (chimera-move).
+ * Schimera for Schwung / Ableton Move: plugin API v2 around the Rust engine (chimera-move).
  *
  * THREADING. Every live plugin entry point runs on the SPI audio callback (MODULES.md "there is
  * no control thread"); create/destroy and the saved-state restore run on the host's SCHED_OTHER
@@ -58,7 +58,7 @@
 #include "params_gen.h"
 
 #define EXPORT __attribute__((visibility("default")))
-#define BUILD_ID "chimera 0.5.1"
+#define BUILD_ID "chimera 0.6.0"
 
 /* ---- the Rust side (engine/crates/chimera-move) */
 typedef struct Handle Handle;
@@ -375,7 +375,7 @@ static void *worker(void *arg) {
     char *lyr = malloc(LYR_MAX); /* the worker may allocate: it is not the callback */
     Handle *h = lyr ? chm_create(in->sr, cfg.light, in->dict_path[0] ? in->dict_path : NULL) : NULL;
     if (!h) {
-        set_error(in, "CHIMERA: the engine could not be built (out of memory?)");
+        set_error(in, "Schimera: the engine could not be built (out of memory?)");
         free(lyr);
         return NULL;
     }
@@ -443,7 +443,7 @@ static void *worker(void *arg) {
         if (!atomic_load_explicit(&in->ready, memory_order_relaxed)) atomic_store_explicit(&in->ready, 1, memory_order_release);
         if (!failed && chm_failed(h)) {
             failed = 1;
-            set_error(in, "CHIMERA: the engine stopped (internal error). Reload the module.");
+            set_error(in, "Schimera: the engine stopped (internal error). Reload the module.");
         }
         /* what the drawn pages show: the view only when it changes, the rest every pass */
         uint64_t vs = chm_view_serial(h);
@@ -692,7 +692,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     pthread_attr_setschedparam(&attr, &sp);
     in->thread_ok = pthread_create(&in->thread, &attr, worker, in) == 0;
     pthread_attr_destroy(&attr);
-    if (!in->thread_ok) set_error(in, "CHIMERA: could not start its render thread");
+    if (!in->thread_ok) set_error(in, "Schimera: could not start its render thread");
     return in;
 }
 
@@ -848,7 +848,7 @@ static int get_param(void *instance, const char *key, char *buf, int len) {
     pub_drain(in);
     if (!strcmp(key, "ui_hierarchy")) return outf(buf, len, "%s", cp_ui_hierarchy);
     if (!strcmp(key, "chain_params")) return outf(buf, len, "%s", cp_chain_params);
-    if (!strcmp(key, "name")) return outf(buf, len, "CHIMERA Voice");
+    if (!strcmp(key, "name")) return outf(buf, len, "Schimera");
     if (!strcmp(key, "state")) return build_state(in, buf, len);
     if (!strcmp(key, "preset")) return outf(buf, len, "%d", in->preset);
     if (!strcmp(key, "preset_count")) return outf(buf, len, "%d", CP_PRESET_COUNT);

@@ -1,6 +1,6 @@
 {
   "id": "chimera",
-  "label": "CHIMERA",
+  "label": "Schimera",
   "items": [
     {"key": "engine", "label": "Engine", "type": "enum", "options": ["Light (about 20% of a CM5 core; CM4 and CM5)", "Full (the original airway, about 60%; CM5 only)"], "values": ["light", "full"], "default": "light"},
     {"key": "buffer", "label": "Buffer", "type": "enum", "options": ["Low (6 ms)", "Normal (12 ms)", "Safe (23 ms): raise it if you hear dropouts"], "values": ["low", "normal", "safe"], "default": "normal"}
