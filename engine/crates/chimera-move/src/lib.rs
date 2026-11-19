@@ -477,7 +477,8 @@ impl Chimera {
 
     /// What the mode's drawn page shows (the plugin serves it as `chm_view`):
     ///   Speak  P|<when each word ends, ms from the line's start, comma separated>|<the line>
-    ///   Sing   S|<the syllables: each one's text, then ' ' at a word's end or SYL_SEP within it>
+    ///   Sing   S|<the syllable to light: the last key's, or the cursor's before any>|<the
+    ///          syllables: each one's text, then ' ' at a word's end or SYL_SEP within it>
     ///   Vowel  (nothing: its page draws from its knobs)
     /// The plugin adds how far into the line the voice is (Speak).
     pub fn view(&mut self) -> &str {
@@ -496,7 +497,7 @@ impl Chimera {
             MODE_SING => {
                 let mut s = String::new();
                 self.sing.view(&mut s);
-                v.push_str("S|");
+                let _ = write!(v, "S|{}|", self.sing.lit());
                 v.push_str(&s);
             }
             _ => {}

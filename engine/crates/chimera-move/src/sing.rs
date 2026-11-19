@@ -32,6 +32,9 @@ pub struct Singer {
     syllables: Vec<Syllable>,
     /// the syllable the next key sings
     cursor: usize,
+    /// the syllable the last key sang (the Lyrics page's highlight); None until a key plays from
+    /// where the cursor was put
+    sung: Option<usize>,
     sounding: Option<Sounding>,
     /// keys down, oldest first
     keys: Vec<u8>,
@@ -48,7 +51,7 @@ pub struct Singer {
 
 impl Default for Singer {
     fn default() -> Self {
-        Singer { syllables: Vec::new(), cursor: 0, sounding: None, keys: Vec::with_capacity(16), next_tag: 2.0, tails: Vec::with_capacity(9), exhales_live: false, scratch: Vec::new(), serial: 1 }
+        Singer { syllables: Vec::new(), cursor: 0, sung: None, sounding: None, keys: Vec::with_capacity(16), next_tag: 2.0, tails: Vec::with_capacity(9), exhales_live: false, scratch: Vec::new(), serial: 1 }
     }
 }
 
@@ -67,6 +70,7 @@ impl Singer {
     pub fn set_lyrics(&mut self, text: &str, g2p: &EnglishG2P) {
         self.syllables = lyrics_to_syllables(text, g2p);
         self.cursor = 0;
+        self.sung = None;
         self.serial += 1;
     }
 
@@ -77,10 +81,20 @@ impl Singer {
 
     /// Move to syllable `i` (held at the last one).
     pub fn set_cursor(&mut self, i: usize) {
-        self.cursor = i.min(self.syllables.len().saturating_sub(1));
+        let i = i.min(self.syllables.len().saturating_sub(1));
+        if self.sung.take().is_some() || i != self.cursor {
+            self.serial += 1;
+        }
+        self.cursor = i;
     }
 
-    /// Changes whenever the syllables do.
+    /// The syllable the Lyrics page lights: the one the last key sang, or, since the lyrics or
+    /// the cursor were set, the one the next key sings.
+    pub fn lit(&self) -> usize {
+        self.sung.unwrap_or(self.cursor)
+    }
+
+    /// Changes whenever the syllables or the lit syllable do.
     pub fn serial(&self) -> u64 {
         self.serial
     }
@@ -173,6 +187,10 @@ impl Singer {
             self.start_note(eng, syl, midi, velocity, body, vibrato);
         }
         self.cursor = (i + 1) % self.syllables.len();
+        if self.sung != Some(i) {
+            self.sung = Some(i);
+            self.serial += 1;
+        }
     }
 
     pub fn note_off(&mut self, eng: &mut Engine, midi: u8, body: BodyMix, vibrato: f64) {

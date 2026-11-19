@@ -4,14 +4,16 @@
  * footer.
  *
  *   line    Speak  the line, the word being said inverted
- *   sung    Sing   the lyrics in syllables, the one the next key sings inverted (Position, live)
+ *   sung    Sing   the lyrics in syllables, the one sounding inverted (before any key: the one
+ *                  the next key sings, Position)
  *   mouth   Vowel  the mouth face-on, at the Vowel knob's place on its path (live: it follows
  *                  pad pressure)
  *   shape   Mouth  the mouth face-on, from the Mouth page's own knobs
  *
  * From `chm_view` (served by the plugin):
  *   P|<ms since the line started, -1: silent>|<when each word ends, ms, comma separated>|<line>
- *   S|<the syllables: each one's text, then ' ' at a word's end or SYL '·' within a word>
+ *   S|<the syllable to light: the last key's, or Position's before any>|<the syllables: each
+ *     one's text, then ' ' at a word's end or SYL '·' within a word>
  *
  * The mouth is our own drawing: its shapes are blended from keyframes measured off a 3D head
  * used only as a reference (design/vowel-34/front_keyframes.py; no model data ships).
@@ -90,16 +92,32 @@
         flow(ctx, line.words.map((t) => ({ t, gap: true })), cur);
     }
 
-    /* ---- Sing: the syllables, the next one inverted (Position) */
+    /* ---- Sing: the syllables, the one sounding inverted. The view names it, but the host
+     * reads the view only every few ticks, so it would light up late. Position (live, read every
+     * tick) steps by one as each key sings, so a step of one lights the syllable it stepped off
+     * at once; the view's answer replaces that guess when it comes (a turn of the knob changes
+     * the view too, so a turn taken for a key is put right). */
+    const sung = { raw: null, tokens: [], hl: 0, pos: NaN };
     function drawLyrics(ctx, v, pos) {
         if (typeof v !== "string" || v[0] !== "S") return;
-        const tokens = [];
-        for (const word of v.slice(2).split(" ").filter(Boolean)) {
-            const syl = word.split(SYL);
-            syl.forEach((s, k) => tokens.push({ t: k < syl.length - 1 ? s + "-" : s, gap: k === 0 }));
-        }
         const p = parseInt(pos, 10);
-        flow(ctx, tokens, isFinite(p) ? Math.min(p, tokens.length - 1) : 0);
+        if (v !== sung.raw) {
+            const a = v.indexOf("|", 2);
+            const tokens = [];
+            for (const word of v.slice(a + 1).split(" ").filter(Boolean)) {
+                const syl = word.split(SYL);
+                syl.forEach((s, k) => tokens.push({ t: k < syl.length - 1 ? s + "-" : s, gap: k === 0 }));
+            }
+            const i = parseInt(v.slice(2, a), 10);
+            sung.raw = v;
+            sung.tokens = tokens;
+            sung.hl = i >= 0 ? i : 0;
+        } else if (isFinite(p) && p !== sung.pos && sung.tokens.length) {
+            const n = sung.tokens.length;
+            sung.hl = isFinite(sung.pos) && p === (sung.pos + 1) % n ? sung.pos : p;
+        }
+        sung.pos = p;
+        flow(ctx, sung.tokens, Math.max(0, Math.min(sung.hl, sung.tokens.length - 1)));
     }
 
     /* ---- the mouth. Eased toward what the values say, frame by frame, so a knob's steps (and

@@ -439,3 +439,40 @@ fn print_the_path_for_the_picture() {
     }
     println!("sweep_knobs ({}): [{}]", keys.iter().map(|k| k.0).collect::<Vec<_>>().join(", "), rows.join(", "));
 }
+
+#[test]
+fn the_lyrics_view_names_the_syllable_sounding_not_the_next() {
+    let d = dict();
+    let mut c = Chimera::new(FS, true, d.as_deref());
+    c.set(P_MODE, MODE_SING as f64);
+    c.set_lyrics("one two three");
+    let serial = |c: &Chimera| c.view_serial();
+    // nothing sung yet: the page lights the cursor
+    assert!(c.view().starts_with("S|0|one two"), "{}", c.view());
+    let s0 = serial(&c);
+    c.note_on(60, 100);
+    assert_eq!(c.cursor(), 1);
+    assert!(c.view().starts_with("S|0|"), "{}", c.view());
+    // held after release, until the next key
+    c.note_off(60);
+    assert!(c.view().starts_with("S|0|"));
+    c.note_on(62, 100);
+    assert!(c.view().starts_with("S|1|"));
+    c.note_off(62);
+    // moving Position lights the cursor, and the page hears of it (also before any key)
+    let s1 = serial(&c);
+    c.set(P_POSITION, 0.0);
+    assert!(c.view().starts_with("S|0|"));
+    assert_ne!(serial(&c), s1);
+    let s2 = serial(&c);
+    c.set(P_POSITION, 1.0);
+    assert!(c.view().starts_with("S|1|"));
+    assert_ne!(serial(&c), s2, "a turn with nothing sung must still reach the page");
+    // the cursor wraps; the sung index is the syllable just started
+    c.set(P_POSITION, 2.0);
+    let s3 = serial(&c);
+    c.note_on(64, 100);
+    assert!(c.view().starts_with("S|2|"));
+    assert_ne!(serial(&c), s3, "the first key after a turn must reach the page");
+    assert_eq!(c.cursor(), 0);
+}

@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
         api->get_param(inst, "position:effective", pe, sizeof pe);
         api->get_param(inst, "position", p2, sizeof p2);
         api->get_param(inst, "chm_view", v, sizeof v);
-        int ok = atoi(p1) == 3 && atoi(p2) == 4 && atoi(pe) == 4 && !strncmp(v, "S|one two", 9);
+        int ok = atoi(p1) == 3 && atoi(p2) == 4 && atoi(pe) == 4 && !strncmp(v, "S|3|one two", 11);
         printf("position                   %s -> %s (%s), view %.30s: %s\n", p1, p2, pe, v, ok ? "ok" : "FAIL");
         if (!ok) failures++;
     }
