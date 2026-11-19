@@ -58,7 +58,7 @@
 #include "params_gen.h"
 
 #define EXPORT __attribute__((visibility("default")))
-#define BUILD_ID "chimera 0.4.1"
+#define BUILD_ID "chimera 0.5.0"
 
 /* ---- the Rust side (engine/crates/chimera-move) */
 typedef struct Handle Handle;

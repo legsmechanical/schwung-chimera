@@ -38,7 +38,8 @@
   {"key": "expression", "name": "Expression", "short": "Expr", "type": "float", "min": 0, "max": 1, "step": 0.01, "unit": "%", "default": 0.35},
   {"key": "position", "name": "Position", "short": "Pos", "type": "int", "min": 0, "max": 255, "step": 1, "default": 0, "live": true, "_doc": "Sing: the syllable the next key sings (0 = the first). Live: answers the cursor, so the Lyrics page follows playing."},
   {"key": "sweep", "name": "Vowel", "type": "float", "min": 0, "max": 1, "step": 0.01, "unit": "%", "default": 0.5, "live": true, "_doc": "Vowel: a path through the vowels (Oo Oh Ah Eh Ee); turning it moves the Mouth knobs. Live: answers the position pad pressure has pushed it to."},
-  {"key": "press_amt", "name": "Pressure", "short": "Push", "type": "float", "min": -1, "max": 1, "step": 0.01, "unit": "%", "default": 0.5, "_doc": "Vowel: how far, and which way, full pad pressure pushes the Vowel along its path."}
+  {"key": "press_amt", "name": "Pressure", "short": "Push", "type": "float", "min": -1, "max": 1, "step": 0.01, "unit": "%", "default": 0.5, "_doc": "Vowel: how far, and which way, full pad pressure pushes the Vowel along its path."},
+  {"key": "legato", "name": "Legato", "type": "enum", "options": ["Next", "Hold"], "short_options": ["NXT", "HLD"], "default": 0, "_doc": "Sing: a key played while another is down sings the next syllable (Next) or carries the sounding one to its pitch (Hold); the lyrics move on at the next key played alone."}
  ],
  "sweep_path": ["Oo", "Oh", "Ah", "Eh", "Ee"],
  "sweep_knobs": {"_doc": "the path as Mouth-knob values (male body) for the Vowel page's picture; from the engine: print_the_path_for_the_picture in tests/perform.rs", "keys": ["tongue_x", "tongue_y", "jaw", "lips", "round", "protrude"], "rows": [[0.373, 0.597, 0.085, 0.236, 0.935, 1.000], [0.137, 0.407, 0.278, 0.282, 0.973, 0.465], [0.269, 0.203, 0.702, 0.920, 0.000, 0.067], [0.632, 0.399, 0.434, 0.728, 0.000, 0.067], [0.706, 0.668, 0.172, 0.538, 0.000, 0.067]]},
@@ -48,7 +49,7 @@
   {"level": "mouth", "label": "Mouth", "visible_if": {"param": "mode", "equals": "Vowel"}, "keys": ["vowel", "tongue_x", "tongue_y", "jaw", "round", "lips", "protrude", "tip_curl"], "canvases": [{"key": "shape", "name": "Mouth"}]},
   {"level": "throat", "label": "Throat", "visible_if": {"param": "mode", "equals": "Vowel"}, "keys": ["larynx", "false_folds", "twang", "tongue_root", "nasal", "lateral"]},
   {"level": "tone", "label": "Tone", "keys": ["breath", "pressed", "bright", "breathy", "rough", "fry", "whisper", "drift"]},
-  {"level": "pitch", "label": "Pitch", "visible_if": {"param": "mode", "not_equals": "Speak"}, "keys": ["vib_rate", {"key": "glide", "visible_if": {"param": "mode", "equals": "Vowel"}}]}
+  {"level": "pitch", "label": "Pitch", "visible_if": {"param": "mode", "not_equals": "Speak"}, "keys": ["vib_rate", {"key": "glide", "visible_if": {"param": "mode", "equals": "Vowel"}}, {"key": "legato", "visible_if": {"param": "mode", "equals": "Sing"}}]}
  ],
  "words": {
    "Made of Air": "Breathe in, breathe out, I am made of air. Tongue and lips and throat, singing anywhere.",

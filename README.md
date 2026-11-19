@@ -11,13 +11,13 @@ One voice at a time. Pick a mode with **Mode**:
 | Mode | What a key does | Its drawn page |
 |---|---|---|
 | **Speak** | Speaks the whole of the lyrics at the key's pitch, with the rhythm and intonation of speech (a question ends high, a statement falls). A new key starts the line again; letting go does not stop it. Velocity sets the breath. **Rate** is how fast, **Expr** how much the pitch moves. | **Line**: the text, the word being said lit |
-| **Sing** | Sings the next syllable of the lyrics at its pitch. Hold a key while playing the next for legato; velocity sets the breath. **Pos** is the syllable the next key sings: turn it to start anywhere. A lone `~` (or `-`) in the lyrics holds the syllable before it onto the next key (melisma): `love ~ ~ you` sings "love" across three keys. | **Lyrics**: the syllables, the one sounding lit (before the first key, the one Pos points at) |
+| **Sing** | Sings the next syllable of the lyrics at its pitch. Hold a key while playing the next for legato; velocity sets the breath. **Pos** is the syllable the next key sings: turn it to start anywhere. A lone `~` (or `-`) in the lyrics holds the syllable before it onto the next key (melisma): `love ~ ~ you` sings "love" across three keys. **Legato** (Pitch page): **Next** sings the next syllable on a key played while another is down; **Hold** carries the sounding syllable to the new pitch, and the lyrics move on at the next key played alone. | **Lyrics**: the syllables, the one sounding lit (before the first key, the one Pos points at) |
 | **Vowel** | Sets the pitch and breathes, as hard as the key was struck. **Vowel** sweeps the mouth through Oo, Oh, Ah, Eh and Ee (the Mouth knobs follow); pad pressure pushes it further along, as far as **Push** says (negative: back the other way). **Hold** drones with no key down. **Mouth** and **Throat** shape it by hand; **Pick** jumps the mouth to one of 13 vowels. | **Vowel**: the mouth, moving with the knob and pressure; **Mouth**: the mouth from its own knobs |
 
 **Words** picks built-in lyrics and **Lyrics** opens the keyboard to type your own (Speak and Sing
 share them). The main page also carries Female and Child (the body, blended continuously) and
 Volume. **Tone** (breath, pressed, bright, airy, rough, fry, whisper, drift) applies to every mode;
-**Pitch** has vibrato rate (Sing, Vowel) and glide (Vowel). The first page is the preset browser;
+**Pitch** has vibrato rate (Sing, Vowel), glide (Vowel) and Legato (Sing). The first page is the preset browser;
 Schwung's own My Presets page saves your sounds.
 
 Sets saved with CHIMERA 0.3 keep their mode; one saved in Beatbox or a creature mode comes back

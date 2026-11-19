@@ -391,7 +391,7 @@ impl Chimera {
 
     pub fn note_on(&mut self, note: u8, velocity: u8) {
         match self.mode() {
-            MODE_SING => self.sing.note_on(&mut self.eng, note, velocity, self.body, self.p[P_VIBRATO]),
+            MODE_SING => self.sing.note_on(&mut self.eng, note, velocity, self.body, self.p[P_VIBRATO], self.p[P_LEGATO] >= 0.5),
             MODE_SPEAK => self.speak.note_on(&mut self.eng, note, velocity),
             _ => {
                 self.held.retain(|&(k, _)| k != note);

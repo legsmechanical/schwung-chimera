@@ -476,3 +476,36 @@ fn the_lyrics_view_names_the_syllable_sounding_not_the_next() {
     assert_ne!(serial(&c), s3, "the first key after a turn must reach the page");
     assert_eq!(c.cursor(), 0);
 }
+
+#[test]
+fn legato_hold_carries_the_syllable_to_the_new_key() {
+    let d = dict();
+    let mut c = Chimera::new(FS, true, d.as_deref());
+    c.set(P_MODE, MODE_SING as f64);
+    c.set_lyrics("one two three");
+    c.set(P_LEGATO, 1.0);
+    c.note_on(60, 100);
+    run(&mut c, 0.3);
+    c.note_on(64, 100); // legato: still "one", now at 64
+    assert_eq!(c.cursor(), 1, "a legato key must not move on in the lyrics");
+    assert!(c.view().starts_with("S|0|"));
+    c.note_off(60);
+    let held = run(&mut c, 0.3);
+    assert!(check("legato hold", &held) > 0.01, "the syllable keeps sounding");
+    c.note_off(64);
+    run(&mut c, 0.6);
+    c.note_on(62, 100); // alone: the next syllable
+    assert_eq!(c.cursor(), 2);
+    assert!(c.view().starts_with("S|1|"));
+    c.note_off(62);
+    run(&mut c, 0.8);
+    assert!(check("legato hold released", &run(&mut c, 0.4)) < 0.003);
+
+    // Next (the default) sings the next syllable on a legato key
+    c.set(P_LEGATO, 0.0);
+    c.set(P_POSITION, 0.0);
+    c.note_on(60, 100);
+    c.note_on(64, 100);
+    assert_eq!(c.cursor(), 2);
+    c.all_notes_off();
+}

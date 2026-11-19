@@ -4,6 +4,8 @@
 //!   coda runs straight into the next onset);
 //! - a "-" in the lyrics holds the vowel onto a new pitch (melisma);
 //! - letting go of the sounding key while another is down glides back to that key, same vowel;
+//! - Legato Hold: a key pressed while another is down carries the sounding syllable to its pitch
+//!   instead of singing the next one (the lyrics move on at the next key played alone);
 //! - velocity sets the breath.
 
 use chimera::anatomy::human::BodyMix;
@@ -168,9 +170,14 @@ impl Singer {
         Self::schedule(eng, &gs);
     }
 
-    pub fn note_on(&mut self, eng: &mut Engine, midi: u8, velocity: u8, body: BodyMix, vibrato: f64) {
+    pub fn note_on(&mut self, eng: &mut Engine, midi: u8, velocity: u8, body: BodyMix, vibrato: f64, hold: bool) {
         self.keys.retain(|&k| k != midi);
+        let legato = !self.keys.is_empty() && self.sounding.is_some();
         self.keys.push(midi);
+        if hold && legato {
+            self.glide(eng, midi, vibrato);
+            return;
+        }
         if self.syllables.is_empty() {
             self.syllables.push(ah());
         }
